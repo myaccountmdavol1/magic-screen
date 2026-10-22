@@ -9,7 +9,9 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "postinstall": "node scripts/copy-mediapipe.mjs",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "harness": "node e2e/harness/run.ts",
+    "fixtures": "node e2e/fixtures/gen/generate.ts"
   },
   "license": "CC-BY-NC-SA-4.0",
   "type": "module",

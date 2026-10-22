@@ -15,8 +15,11 @@ export interface MaskFrame {
 
 export interface Segmenter {
   readonly delegate: Delegate
-  /** Segment the current video frame. Null if there is no frame yet or inference failed. */
-  segment(video: HTMLVideoElement, ts: number): MaskFrame | null
+  /**
+   * Segment the current video frame (or a canvas, for the quality harness). Null if
+   * there is no frame yet or inference failed.
+   */
+  segment(video: HTMLVideoElement | HTMLCanvasElement, ts: number): MaskFrame | null
   /**
    * Warm up, then time `frames` calls (one per animation frame so the UI keeps
    * moving) and return the median ms per call, including the mask readback.
@@ -60,8 +63,9 @@ export async function createSegmenter(): Promise<Segmenter> {
   let lastTs = -1
   let closed = false
 
-  const segment = (video: HTMLVideoElement, ts: number): MaskFrame | null => {
-    if (closed || video.readyState < 2 || !video.videoWidth) return null
+  const segment = (video: HTMLVideoElement | HTMLCanvasElement, ts: number): MaskFrame | null => {
+    if (closed) return null
+    if ('videoWidth' in video ? video.readyState < 2 || !video.videoWidth : !video.width) return null
     // MediaPipe requires strictly increasing timestamps (ms).
     const t = Math.max(Math.round(ts), lastTs + 1)
     lastTs = t

@@ -17,3 +17,7 @@ web/playwright-report/
 .vercel/
 .vercel
 .env*
+
+# Keyer harness: generated fixtures + per-run frame dumps (regenerate on demand)
+web/e2e/fixtures/out/
+web/e2e/harness/results/*/

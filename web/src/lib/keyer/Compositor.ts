@@ -451,6 +451,7 @@ export class Compositor {
   private bgColor: RGB = EMPTY_BG
   private fg: TrackedSource | null = null
   private mirror = false
+  private fgLive = false
   private key: KeySettings = DEFAULT_KEY
   private me: MeTransform = { x: 0.5, y: 0.5, scale: 1 }
   private stickers: StickerDraw[] = []
@@ -610,8 +611,14 @@ export class Compositor {
     if (src !== this.bg?.src) this.replaceBg(src)
   }
 
-  setForeground(src: ForegroundSource | null, opts?: { mirror?: boolean }): void {
+  /**
+   * @param opts.live treat a canvas source as a live camera (drift tracking + shirt
+   *   check run). Videos are always live. Used by the quality harness, which feeds
+   *   generated frames through a canvas.
+   */
+  setForeground(src: ForegroundSource | null, opts?: { mirror?: boolean; live?: boolean }): void {
     this.mirror = !!opts?.mirror
+    this.fgLive = !!opts?.live
     if (src === this.fg?.src) return
     this.fg?.dispose()
     this.fg = src ? new TrackedSource(src) : null
@@ -1435,6 +1442,40 @@ export class Compositor {
     return r
   }
 
+  /**
+   * Harness only: read back the matte of the last render() at camera resolution
+   * (R = alpha, top row first, unmirrored) WITHOUT re-running any keying pass, so
+   * temporal state is untouched. Null on the Canvas2D path or before a frame.
+   */
+  debugReadMatte(): { data: Uint8Array; w: number; h: number } | null {
+    const st = this.glState
+    const fg = this.fg
+    if (!st || this.contextLost || !fg || !fg.uploaded) return null
+    const { w, h } = this.colorSize()
+    if (!w || !h) return null
+    const { gl } = st
+    gl.bindVertexArray(st.vao)
+    const target = createTarget(gl, w, h, false)
+    if (!target) return null
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
+    gl.viewport(0, 0, w, h)
+    gl.disable(gl.BLEND)
+    gl.clearColor(0, 0, 0, 1)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    this.drawFg(st, { cx: w / 2, cy: h / 2, w, h }, w, h, true)
+    const raw = new Uint8Array(w * h * 4)
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, raw)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    deleteTargets(gl, [target])
+    gl.viewport(0, 0, this._width, this._height)
+    const out = new Uint8Array(w * h)
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w * 4
+      for (let x = 0; x < w; x++) out[y * w + x] = raw[src + x * 4]
+    }
+    return { data: out, w, h }
+  }
+
   private matteGl(st: GlState, w: number, h: number): Uint8ClampedArray {
     const { gl } = st
     gl.bindVertexArray(st.vao)
@@ -1487,7 +1528,8 @@ export class Compositor {
       return
     }
     const now = performance.now()
-    if (this.key.mode !== 'chroma' || !this.fg || !isVideo(this.fg.src) || !this.matteValid || !st.pbo) return
+    if (this.key.mode !== 'chroma' || !this.fg || !(this.fgLive || isVideo(this.fg.src)) || !this.matteValid || !st.pbo)
+      return
     if (now - this.lastSampleAt < RECAL_MS) return
     this.lastSampleAt = now
     const { w: fw, h: fh } = this.colorSize()
