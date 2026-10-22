@@ -15,3 +15,5 @@ web/playwright-report/
 
 # Vercel CLI link
 .vercel/
+.vercel
+.env*
