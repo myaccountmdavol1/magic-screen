@@ -22,7 +22,7 @@ Research notes are in `docs/research/` (doink.md, talkline.md, critique.md, `rea
 | 4 Snap/Film | A Photo / Video toggle, shown as two big picture cards. Then a 160px hero button, a spoken 3-2-1 countdown, a giant stop button, and the hard limit from settings. |
 | 5 Keep | Playback, confetti, **Save** (Web Share with files, falling back to a download), saved to the gallery automatically, **Make another**. |
 
-**Home:** big "Let's make!" card plus a grid of saved creations. Holding the gear for 2 seconds opens the teacher gate (4-digit PIN, default 1234).
+**Home:** big "Let's make!" card plus a grid of saved creations. Holding the gear for 2 seconds opens the grown-up check: a fresh multiplication question (3–9 × 3–9) each time, so there is no code to remember, change or forget.
 
 **Teacher settings:**
 - key color, similarity, smoothness and spill sliders, with a live preview
@@ -30,7 +30,7 @@ Research notes are in `docs/research/` (doink.md, talkline.md, critique.md, `rea
 - resolution, max video seconds, countdown
 - voice and sounds toggles, mirror
 - Magic Helper: Auto / On / Off (teacher-only; kids never see it)
-- delete creations, change PIN
+- delete creations
 - "How to set up your green screen" tips, based on the DoInk reference sheets: even lighting, no green clothes, keep the subject away from the screen
 
 ## Visual rules

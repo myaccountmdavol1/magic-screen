@@ -1,20 +1,36 @@
 import { useEffect, useRef, useState } from 'react'
-import { useApp } from '../state/store'
 import { playSound } from '../lib/sound'
 import { Icon } from './Icon'
 import { IconButton } from './IconButton'
 
-const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'del'] as const
+const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'del', '0', 'ok'] as const
 
-/** 4-digit PIN keypad that keeps kids out of teacher settings. */
+interface Question {
+  a: number
+  b: number
+}
+
+/** 3..9 times 3..9: easy for a grown-up, out of reach for a kindergartner. */
+export function newQuestion(prev?: Question): Question {
+  for (;;) {
+    const q = { a: 3 + Math.floor(Math.random() * 7), b: 3 + Math.floor(Math.random() * 7) }
+    if (!prev || q.a !== prev.a || q.b !== prev.b) return q
+  }
+}
+
+/**
+ * Grown-up check that keeps kids out of teacher settings. There is no code to
+ * remember, change or forget: each time it asks a fresh multiplication question.
+ */
 export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSuccess: () => void; onClose: () => void }) {
-  const pin = useApp((s) => s.settings.teacherPin)
+  const [q, setQ] = useState<Question>(() => newQuestion())
   const [entry, setEntry] = useState('')
   const [wrong, setWrong] = useState(false)
   const firstKeyRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
+    setQ((prev) => newQuestion(prev))
     setEntry('')
     setWrong(false)
     firstKeyRef.current?.focus()
@@ -23,23 +39,22 @@ export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSucc
   const press = (k: (typeof KEYS)[number]) => {
     playSound('tap')
     setWrong(false)
-    if (k === 'clear') return setEntry('')
     if (k === 'del') return setEntry(entry.slice(0, -1))
-    if (entry.length >= 4) return
-    const nextEntry = entry + k
-    setEntry(nextEntry)
-    if (nextEntry.length === 4) {
-      // Defer the verdict a beat so the 4th dot is visibly filled first.
-      window.setTimeout(() => {
-        if (nextEntry === pin) {
-          playSound('success')
-          onSuccess()
-        } else {
-          setWrong(true)
-          setEntry('')
-        }
-      }, 160)
+    if (k === 'ok') {
+      if (!entry) return
+      if (Number(entry) === q.a * q.b) {
+        playSound('success')
+        onSuccess()
+      } else {
+        // A wrong answer gets a brand new question, so guessing doesn't pay off.
+        setWrong(true)
+        setEntry('')
+        setQ((prev) => newQuestion(prev))
+      }
+      return
     }
+    if (entry.length >= 2) return
+    setEntry(entry + k)
   }
 
   // Hardware keyboard support (desktop / iPad keyboard). A ref keeps the listener stable.
@@ -53,6 +68,7 @@ export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSucc
       if (e.key === 'Escape') closeRef.current()
       else if (/^[0-9]$/.test(e.key)) pressRef.current(e.key as (typeof KEYS)[number])
       else if (e.key === 'Backspace') pressRef.current('del')
+      else if (e.key === 'Enter') pressRef.current('ok')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -68,14 +84,15 @@ export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSucc
           <Icon name="lock" size={36} />
         </div>
         <h2 id="gate-title">Grown-ups only</h2>
-        <p className="muted">Ask your teacher to type the secret code.</p>
-        <div className={`pin-dots${wrong ? ' shake' : ''}`} aria-label={`${entry.length} of 4 digits entered`}>
-          {[0, 1, 2, 3].map((i) => (
-            <span key={i} className={`pin-dot${i < entry.length ? ' filled' : ''}`} />
-          ))}
+        <p className="muted">Ask a grown-up to answer this.</p>
+        <p className="gate-question" id="gate-question">
+          {q.a} × {q.b} = ?
+        </p>
+        <div className={`gate-answer${wrong ? ' shake' : ''}`} role="status" aria-labelledby="gate-question">
+          {entry || <span className="gate-answer-placeholder">?</span>}
         </div>
         <p className="gate-error" role="alert">
-          {wrong ? 'Oops! That code is not right.' : ' '}
+          {wrong ? 'Not quite. Try this one!' : '\u00a0'}
         </p>
         <div className="keypad">
           {KEYS.map((k, i) => (
@@ -83,11 +100,11 @@ export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSucc
               key={k}
               ref={i === 0 ? firstKeyRef : undefined}
               type="button"
-              className={`key${k === 'clear' || k === 'del' ? ' key-fn' : ''}`}
-              aria-label={k === 'clear' ? 'Clear' : k === 'del' ? 'Delete' : k}
+              className={`key${k === 'del' ? ' key-fn' : k === 'ok' ? ' key-ok' : ''}`}
+              aria-label={k === 'ok' ? 'Check answer' : k === 'del' ? 'Delete' : k}
               onClick={() => press(k)}
             >
-              {k === 'clear' ? <Icon name="reset" size={28} /> : k === 'del' ? <Icon name="back" size={28} /> : k}
+              {k === 'ok' ? <Icon name="check" size={30} /> : k === 'del' ? <Icon name="back" size={28} /> : k}
             </button>
           ))}
         </div>

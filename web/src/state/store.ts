@@ -27,7 +27,6 @@ export const DEFAULT_SETTINGS: Settings = {
   greenScreenMode: 'auto',
   outline: 0,
   magicHelper: 'auto',
-  teacherPin: '1234',
 }
 
 const SETTINGS_KEY = 'magicscreen.settings'

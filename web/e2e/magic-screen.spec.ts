@@ -157,7 +157,7 @@ test('keyer: the green is removed and the child is kept', async ({ page, shot })
   expect(stats.center.greenFrac).toBeLessThan(0.02)
 })
 
-test('teacher gate: hold the gear, wrong PIN is rejected, 1234 opens Teacher', async ({ page, shot }) => {
+test('teacher gate: hold the gear, a wrong answer is rejected, the right answer opens Teacher', async ({ page, shot }) => {
   await openHome(page)
   const gear = page.getByRole('button', { name: /Teacher settings\. Press and hold/ })
 
@@ -176,13 +176,26 @@ test('teacher gate: hold the gear, wrong PIN is rejected, 1234 opens Teacher', a
   await expect(gate).toBeVisible()
   await shot('gate')
 
-  for (const d of ['9', '9', '9', '9']) await gate.getByRole('button', { name: d, exact: true }).click()
-  await expect(gate.getByRole('alert')).toHaveText('Oops! That code is not right.')
-  await expect(gate.locator('.pin-dot.filled')).toHaveCount(0)
+  const question = gate.locator('.gate-question')
+  const answerFor = async () => {
+    const m = (await question.innerText()).match(/(\d+)\s*×\s*(\d+)/)
+    expect(m).not.toBeNull()
+    return Number(m![1]) * Number(m![2])
+  }
+  const typeAnswer = async (n: number) => {
+    for (const d of String(n)) await gate.getByRole('button', { name: d, exact: true }).click()
+    await gate.getByRole('button', { name: 'Check answer' }).click()
+  }
+
+  // Wrong answer: friendly message, a brand new question, gate stays shut.
+  const first = await question.innerText()
+  await typeAnswer((await answerFor()) + 1)
+  await expect(gate.getByRole('alert')).toHaveText('Not quite. Try this one!')
+  await expect(question).not.toHaveText(first)
   await expect(gate).toBeVisible()
   await shot('gate-wrong')
 
-  for (const d of ['1', '2', '3', '4']) await gate.getByRole('button', { name: d, exact: true }).click()
+  await typeAnswer(await answerFor())
   await expect(page.getByRole('heading', { level: 1, name: 'Teacher settings' })).toBeVisible()
   await expect(gate).toHaveCount(0)
   await shot('teacher')

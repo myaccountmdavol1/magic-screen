@@ -458,71 +458,6 @@ function CreationsCard() {
   )
 }
 
-function PinCard() {
-  const update = useApp((s) => s.updateSettings)
-  const [pin, setPin] = useState('')
-  const [again, setAgain] = useState('')
-  const [error, setError] = useState('')
-  const idA = useId()
-  const idB = useId()
-
-  const save = () => {
-    if (!/^\d{4}$/.test(pin)) return setError('The code must be 4 numbers.')
-    if (pin !== again) return setError('The two codes do not match.')
-    update({ teacherPin: pin })
-    setPin('')
-    setAgain('')
-    setError('')
-    playSound('success')
-    toast('New code saved')
-  }
-
-  const digitsOnly = (v: string) => v.replace(/\D/g, '').slice(0, 4)
-
-  return (
-    <Card icon="lock" title="Change code" tone="sun">
-      <p className="t-note">The 4-number code that opens these settings. The first code is 1234.</p>
-      <div className="pin-fields">
-        <label htmlFor={idA} className="t-label">
-          New code
-          <input
-            id={idA}
-            className="t-input pin-input"
-            type="password"
-            inputMode="numeric"
-            autoComplete="new-password"
-            maxLength={4}
-            value={pin}
-            onChange={(e) => setPin(digitsOnly(e.target.value))}
-          />
-        </label>
-        <label htmlFor={idB} className="t-label">
-          Type it again
-          <input
-            id={idB}
-            className="t-input pin-input"
-            type="password"
-            inputMode="numeric"
-            autoComplete="new-password"
-            maxLength={4}
-            value={again}
-            onChange={(e) => setAgain(digitsOnly(e.target.value))}
-            onKeyDown={(e) => e.key === 'Enter' && save()}
-          />
-        </label>
-      </div>
-      {error && (
-        <p className="t-result bad" role="alert">
-          <Icon name="close" size={20} /> {error}
-        </p>
-      )}
-      <Button icon="check" onClick={save} disabled={pin.length !== 4 || again.length !== 4}>
-        Save code
-      </Button>
-    </Card>
-  )
-}
-
 const TIPS: { icon: IconName; title: string; text: string }[] = [
   { icon: 'sparkle', title: 'Light it evenly', text: 'Light the green screen and the child evenly. Dark patches and shadows are the #1 cause of holes and flicker.' },
   { icon: 'smile', title: 'No green clothes', text: 'Anything the same color as the screen disappears. (Fun lesson: a green scarf is an invisibility cloak!)' },
@@ -615,7 +550,6 @@ export default function Teacher() {
         </Card>
 
         <CreationsCard />
-        <PinCard />
 
         <Card icon="star" title="Green screen tips" tone="sun">
           <ul className="tips">

@@ -88,5 +88,4 @@ export interface Settings {
   outline: number
   /** Tier 2 "Magic Helper" (on-device MediaPipe person finder) in green screen mode. Teacher-only. */
   magicHelper: 'auto' | 'on' | 'off'
-  teacherPin: string // 4 digits, default '1234'
 }

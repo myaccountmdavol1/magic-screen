@@ -833,32 +833,6 @@ img.view-stage {
   padding: 0.75rem;
 }
 
-/* PIN */
-.pin-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.pin-fields label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  flex: 1 1 10rem;
-}
-
-/* .t-input's flex-basis (14rem) is meant for row layouts; in this column label it became
-   the input's height and drew 14rem-tall boxes. */
-.pin-fields .t-input {
-  flex: none;
-}
-
-.pin-input {
-  letter-spacing: 0.5em;
-  font-size: 1.4rem;
-  text-align: center;
-}
-
 /* Tips */
 .tips {
   display: flex;
