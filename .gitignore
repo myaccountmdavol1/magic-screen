@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.y4m
+*.tsbuildinfo
+.DS_Store
+
+# Copied/downloaded by web/scripts/copy-mediapipe.mjs on npm install
+web/public/mediapipe/
+
+# Playwright output
+web/test-results/
+web/playwright-report/
+
+# Vercel CLI link
+.vercel/

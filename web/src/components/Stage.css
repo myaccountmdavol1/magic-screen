@@ -1,0 +1,290 @@
+/* Live stage: Talkline photo-stage look (white 4px outline, 1.5rem radius, soft blue shadow). */
+
+.stage-slot {
+  position: relative;
+  width: 100%;
+  /* Keep the 16:9 stage fully on screen on short landscape screens. */
+  max-width: min(100%, calc((100vh - 15rem) * 16 / 9));
+  max-width: min(100%, calc((100dvh - 15rem) * 16 / 9));
+  min-width: min(100%, 18rem);
+  margin: 0 auto;
+}
+
+.stage-mount,
+.stage-host {
+  width: 100%;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--grape-50);
+  outline: 4px solid #fff;
+  box-shadow: var(--shadow-stage);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.stage-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.stage-touch {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.stage[data-step='me'] .stage-touch {
+  cursor: grab;
+}
+
+.stage.is-magic .stage-touch {
+  cursor: crosshair;
+}
+
+.stage.is-magic {
+  outline-color: var(--sun-400);
+}
+
+/* Overlay that steps put on top of the stage (countdown, flash, badges). */
+.stage-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.stage-overlay :is(button, a, [role='button']) {
+  pointer-events: auto;
+}
+
+/* --- selected sticker: dashed box + corner tools -------------------------- */
+.sticker-select {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.sticker-select::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 0.6rem;
+  outline: 3px dashed var(--grape-500);
+  outline-offset: 4px;
+}
+
+.sticker-tool {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  padding: 0;
+  border: 3px solid #fff;
+  border-radius: var(--radius-pill);
+  color: #fff;
+  box-shadow: 0 5px 12px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+  touch-action: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Invisible padding so the touch target reaches 64px while the dot stays small. */
+.sticker-tool::before {
+  content: '';
+  position: absolute;
+  inset: -0.6rem;
+  border-radius: inherit;
+}
+
+.sticker-tool.delete {
+  left: -1.4rem;
+  top: -1.4rem;
+  background: var(--bubble-500);
+}
+
+.sticker-tool.resize {
+  right: -1.4rem;
+  bottom: -1.4rem;
+  background: var(--grape-500);
+  cursor: nwse-resize;
+}
+
+.sticker-tool:active {
+  transform: scale(0.92);
+}
+
+/* Phones: a sticker can be only ~40px wide, so the corner tools (and their 64px touch
+   padding) would cover its middle and a drag would resize instead of move. Park the
+   tools just outside the box so the sticker itself stays grabbable. */
+@media (max-width: 639px) {
+  .sticker-tool.delete {
+    left: -2.6rem;
+    top: -2.6rem;
+  }
+  .sticker-tool.resize {
+    right: -2.6rem;
+    bottom: -2.6rem;
+  }
+}
+
+/* --- magic finger -------------------------------------------------------- */
+/* While the camera-trouble card is up, its hint pill would peek through the cover. */
+.stage:has(.stage-trouble) .stage-hint {
+  display: none;
+}
+
+.stage-hint {
+  position: absolute;
+  inset-inline: 0;
+  top: 0.75rem;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  animation: pop-in 280ms var(--ease-pop) both;
+}
+
+.stage-hint span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-tile);
+  background: rgba(27, 79, 156, 0.78);
+  color: #fff;
+  font-weight: 900;
+  font-size: 1.1rem;
+}
+
+.stage-sparkle {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  width: 0;
+  height: 0;
+  place-items: center;
+  color: var(--sun-400);
+  pointer-events: none;
+}
+
+.stage-sparkle > svg {
+  position: absolute;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+  animation: stage-sparkle-pop 900ms var(--ease-pop) both;
+}
+
+.stage-sparkle .ring {
+  position: absolute;
+  width: 5rem;
+  height: 5rem;
+  border: 4px solid #fff;
+  border-radius: var(--radius-pill);
+  animation: stage-ring 700ms ease-out both;
+}
+
+@keyframes stage-sparkle-pop {
+  0% { opacity: 0; transform: scale(0.3) rotate(-30deg); }
+  40% { opacity: 1; transform: scale(1.3) rotate(10deg); }
+  100% { opacity: 0; transform: scale(1) rotate(0deg) translateY(-1.5rem); }
+}
+
+@keyframes stage-ring {
+  0% { opacity: 1; transform: scale(0.2); }
+  100% { opacity: 0; transform: scale(1.6); }
+}
+
+/* --- loading + camera trouble covers ------------------------------------- */
+.stage-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 1rem;
+  text-align: center;
+  color: var(--grape-700);
+  font-weight: 800;
+}
+
+.stage-loading {
+  background: rgba(238, 246, 255, 0.85);
+  pointer-events: none;
+}
+
+.stage-spinner {
+  width: 3rem;
+  height: 3rem;
+  border: 6px solid var(--grape-100);
+  border-top-color: var(--grape-500);
+  border-radius: var(--radius-pill);
+  animation: stage-spin 900ms linear infinite;
+}
+
+@keyframes stage-spin {
+  to { transform: rotate(360deg); }
+}
+
+.stage-trouble {
+  background: rgba(255, 255, 255, 0.94);
+  animation: pop-in 280ms var(--ease-pop) both;
+  overflow-y: auto;
+}
+
+.stage-trouble h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: clamp(1.3rem, 3vw, 1.8rem);
+  line-height: 1.1;
+}
+
+.stage-trouble p {
+  margin: 0;
+  max-width: 26rem;
+  color: var(--text-soft);
+}
+
+.trouble-icon {
+  display: grid;
+  width: 4.5rem;
+  height: 4.5rem;
+  place-items: center;
+  border-radius: var(--radius-tile);
+  background: rgba(251, 146, 60, 0.22);
+  color: var(--tang-600);
+}
+
+.trouble-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+}
+
+@media (max-width: 480px) {
+  .stage-trouble .trouble-icon {
+    display: none;
+  }
+  .stage-trouble p {
+    font-size: 0.9rem;
+  }
+}

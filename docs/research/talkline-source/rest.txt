@@ -1,0 +1,1835 @@
+</style>
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+  </head>
+  <body>
+    <div class="blob blob-sun" aria-hidden="true"></div>
+    <div class="blob blob-sky" aria-hidden="true"></div>
+    <div class="blob blob-pink" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="logo" aria-label="TalkLine">
+          <span class="logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64">
+              <circle cx="32" cy="30" r="20" fill="#7cc6f5" stroke="#2f8fef" stroke-width="3"></circle>
+              <circle cx="25" cy="27" r="3" fill="#1b3a6b"></circle>
+              <circle cx="39" cy="27" r="3" fill="#1b3a6b"></circle>
+              <path d="M23 35 q9 9 18 0" fill="none" stroke="#1b3a6b" stroke-width="3" stroke-linecap="round"></path>
+            </svg>
+          </span>
+          <span class="wordmark">
+            <span>Talk</span><span class="pink">L</span><span class="sun">i</span><span class="mint">n</span><span class="blue">e</span>
+          </span>
+        </div>
+      </header>
+
+      <nav class="steps" aria-label="Steps" id="steps"></nav>
+
+      <main class="panel" id="app" aria-live="polite"></main>
+
+      <footer class="footer">
+        <p class="privacy">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="9" rx="2"></rect>
+            <path d="M8 11V8a4 4 0 0 1 8 0v3"></path>
+          </svg>
+          Everything you make stays on your device.
+        </p>
+        <button class="link-button" id="about-toggle" type="button">About &amp; credits</button>
+        <div class="about" id="about" hidden>
+          <p><strong>TalkLine</strong> makes still photos talk, right in your browser. No account, no uploads, no servers.</p>
+          <p>The mouth animation is driven by how loud your voice is. There is no AI face tracking.</p>
+          <p>This version is a plain single-page HTML, CSS, and JavaScript app.</p>
+        </div>
+      </footer>
+    </div>
+
+    <div class="modal-root" id="modal-root"></div>
+    <script>
+const ANIMATION = {
+  fps: 30,
+  maxAngleDeg: 2.5,
+  maxDropFraction: 0.32,
+  openFloor: 0.12,
+  silenceGate: 0.06,
+  attack: 0.6,
+  release: 0.28,
+  normalizePercentile: 0.95,
+  gamma: 0.8,
+  rotationSign: 1,
+};
+
+const CANVAS = {
+  workingMaxEdge: 1280,
+  exportMaxEdge: 720,
+};
+
+const AUDIO = {
+  maxSeconds: 60,
+};
+
+const STEPS = [
+  { n: 1, label: "Photo" },
+  { n: 2, label: "Mouth" },
+  { n: 3, label: "Voice" },
+  { n: 4, label: "Stickers" },
+  { n: 5, label: "Save" },
+];
+
+const STARTER_LINE = {
+  a: { x: 0.37, y: 0.56 },
+  b: { x: 0.63, y: 0.56 },
+  mid: { x: 0.5, y: 0.56 },
+};
+
+const state = {
+  step: 1,
+  maxStep: 1,
+  photo: null,
+  line: null,
+  audio: null,
+  envelope: null,
+  stickers: [],
+  selectedSticker: null,
+  stickerPack: "shapes",
+  photoBusy: false,
+  photoError: "",
+  recordStatus: "idle",
+  recordElapsed: 0,
+  recordLevel: 0,
+  recordPlaying: false,
+  recordError: "",
+  previewPlaying: false,
+  exportState: { phase: "idle", progress: 0, message: "" },
+  resultUrl: "",
+  resultFilename: "",
+  resultType: "",
+};
+
+let stickerSeq = 0;
+let sharedAudioContext = null;
+let recorder = null;
+let recordStream = null;
+let recordAnalyser = null;
+let recordRaf = 0;
+let recordTimer = 0;
+let recordChunks = [];
+let recordStartedAt = 0;
+let previewRaf = 0;
+let exportAbort = false;
+let renderStickersCacheKey = "";
+let renderStickersCache = [];
+
+const app = document.querySelector("#app");
+const stepsEl = document.querySelector("#steps");
+const aboutToggle = document.querySelector("#about-toggle");
+const about = document.querySelector("#about");
+const modalRoot = document.querySelector("#modal-root");
+
+aboutToggle.addEventListener("click", () => {
+  about.hidden = !about.hidden;
+});
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function allowsBrowserFeature(featureName) {
+  const policy = document.permissionsPolicy || document.featurePolicy;
+  if (!policy || typeof policy.allowsFeature !== "function") return true;
+  try {
+    return policy.allowsFeature(featureName);
+  } catch {
+    return true;
+  }
+}
+
+function permissionPolicyMessage(kind) {
+  if (kind === "camera") {
+    return "Camera is blocked by this page or iframe. Open this HTML file directly in a browser tab to take a photo, or upload a photo instead.";
+  }
+  return "Microphone is blocked by this page or iframe. Open this HTML file directly in a browser tab to record audio, or use a page that allows microphone access.";
+}
+
+function goTo(step) {
+  stopPreview();
+  state.step = clamp(step, 1, 5);
+  state.maxStep = Math.max(state.maxStep, state.step);
+  render();
+}
+
+function next() {
+  goTo(state.step + 1);
+}
+
+function back() {
+  goTo(state.step - 1);
+}
+
+function resetProject() {
+  stopPreview();
+  cleanupRecording();
+  if (state.photo?.url) URL.revokeObjectURL(state.photo.url);
+  if (state.audio?.url) URL.revokeObjectURL(state.audio.url);
+  if (state.resultUrl) URL.revokeObjectURL(state.resultUrl);
+  for (const sticker of state.stickers) {
+    if (sticker.type === "custom" && sticker.src) URL.revokeObjectURL(sticker.src);
+  }
+  Object.assign(state, {
+    step: 1,
+    maxStep: 1,
+    photo: null,
+    line: null,
+    audio: null,
+    envelope: null,
+    stickers: [],
+    selectedSticker: null,
+    photoBusy: false,
+    photoError: "",
+    recordStatus: "idle",
+    recordElapsed: 0,
+    recordLevel: 0,
+    recordPlaying: false,
+    recordError: "",
+    previewPlaying: false,
+    exportState: { phase: "idle", progress: 0, message: "" },
+    resultUrl: "",
+    resultFilename: "",
+    resultType: "",
+  });
+  renderStickersCacheKey = "";
+  renderStickersCache = [];
+  render();
+}
+
+function renderSteps() {
+  stepsEl.innerHTML = `<ol>${STEPS.map((step, index) => {
+    const done = step.n < state.step;
+    const active = step.n === state.step;
+    const reachable = step.n <= state.maxStep;
+    return `
+      <li class="step-item">
+        <button
+          class="step-button ${active ? "active" : ""} ${done ? "done" : ""}"
+          type="button"
+          data-step="${step.n}"
+          ${active ? 'aria-current="step"' : ""}
+          ${reachable ? "" : "disabled"}
+        >
+          <span class="step-circle">${done ? checkSvg() : step.n}</span>
+          <span class="step-label">${step.label}</span>
+        </button>
+        ${index < STEPS.length - 1 ? `<span class="step-line ${done ? "done" : ""}"></span>` : ""}
+      </li>
+    `;
+  }).join("")}</ol>`;
+
+  stepsEl.querySelectorAll("[data-step]").forEach((button) => {
+    button.addEventListener("click", () => goTo(Number(button.dataset.step)));
+  });
+}
+
+function checkSvg() {
+  return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="3"><path d="m5 13 4 4 10-11" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
+}
+
+function render() {
+  renderSteps();
+  if (state.step === 1) renderStep1();
+  if (state.step === 2) renderStep2();
+  if (state.step === 3) renderStep3();
+  if (state.step === 4) renderStep4();
+  if (state.step === 5) renderStep5();
+}
+
+function stepShell(title, subtitle, body, nav, navClass = "") {
+  app.innerHTML = `
+    <section class="step-view">
+      <header class="step-header">
+        <h1>${title}</h1>
+        ${subtitle ? `<p>${subtitle}</p>` : ""}
+      </header>
+      <div class="step-body">${body}</div>
+      ${nav ? `<div class="nav-row ${navClass}">${nav}</div>` : ""}
+    </section>
+  `;
+}
+
+function renderStep1() {
+  const body = state.photo ? `
+    <div class="stage-wrap">
+      <div class="stage"><canvas class="canvas" id="photo-preview"></canvas></div>
+      <p class="message success">Looks great! Tap Next to keep going.</p>
+    </div>
+  ` : `
+    <div class="upload-grid">
+      <button class="choice-card" type="button" id="upload-choice" ${state.photoBusy ? "disabled" : ""}>
+        <span class="choice-icon">${uploadSvg()}</span>
+        <span class="choice-title">Upload a Photo</span>
+        <span class="muted">From your device</span>
+      </button>
+      <button class="choice-card camera" type="button" id="camera-choice" ${state.photoBusy ? "disabled" : ""}>
+        <span class="choice-icon">${cameraSvg()}</span>
+        <span class="choice-title">Take a Photo</span>
+        <span class="muted">Use your camera</span>
+      </button>
+    </div>
+  `;
+
+  const status = `
+    <input class="hidden-input" id="photo-file" type="file" accept="image/png,image/jpeg,image/webp,image/heic,image/heif,image/*">
+    <input class="hidden-input" id="camera-file" type="file" accept="image/*" capture="environment">
+    ${state.photoBusy ? `<p class="message">Opening your photo...</p>` : ""}
+    ${state.photoError ? `<p class="message error">${escapeHtml(state.photoError)}</p>` : ""}
+  `;
+
+  const nav = state.photo ? `
+    <button class="button secondary" type="button" id="change-photo">Choose a different photo</button>
+    <button class="button large" type="button" id="next-photo">Next: Draw a mouth</button>
+  ` : `<span class="muted">Add a photo to get started.</span>`;
+
+  stepShell("Pick a photo", "Choose a fun face - a pet, a drawing, or you!", body + status, nav, state.photo ? "" : "end");
+
+  const fileInput = document.querySelector("#photo-file");
+  const cameraInput = document.querySelector("#camera-file");
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = "";
+    if (file) await handlePhotoFile(file);
+  });
+  cameraInput.addEventListener("change", async () => {
+    const file = cameraInput.files?.[0];
+    cameraInput.value = "";
+    if (file) await handlePhotoFile(file);
+  });
+  document.querySelector("#upload-choice")?.addEventListener("click", () => fileInput.click());
+  document.querySelector("#camera-choice")?.addEventListener("click", openCamera);
+  document.querySelector("#change-photo")?.addEventListener("click", () => fileInput.click());
+  document.querySelector("#next-photo")?.addEventListener("click", next);
+
+  if (state.photo) drawPhotoCanvas(document.querySelector("#photo-preview"), 0, []);
+}
+
+function uploadSvg() {
+  return `<svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5"></path><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"></path></svg>`;
+}
+
+function cameraSvg() {
+  return `<svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L19 6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z"></path><circle cx="12" cy="12.5" r="3.5"></circle></svg>`;
+}
+
+async function handlePhotoFile(file) {
+  state.photoBusy = true;
+  state.photoError = "";
+  render();
+  try {
+    const loaded = await loadPhotoFromFile(file);
+    if (state.photo?.url) URL.revokeObjectURL(state.photo.url);
+    state.photo = loaded;
+    state.line = null;
+    state.maxStep = Math.max(state.maxStep, 1);
+  } catch {
+    state.photoError = "Hmm, we couldn't open that picture. Try a JPG or PNG.";
+  } finally {
+    state.photoBusy = false;
+    render();
+  }
+}
+
+function loadImage(src, cacheKey = src) {
+  if (imageCache.has(cacheKey)) {
+    const cached = imageCache.get(cacheKey);
+    if (cached.complete && cached.naturalWidth > 0) return Promise.resolve(cached);
+  }
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      imageCache.set(cacheKey, img);
+      resolve(img);
+    };
+    img.onerror = () => reject(new Error(`Failed to load image: ${cacheKey}`));
+    img.src = src;
+  });
+}
+
+function fitDimensions(w, h, maxEdge) {
+  const longest = Math.max(w, h);
+  const scale = longest > maxEdge ? maxEdge / longest : 1;
+  return { width: Math.round(w * scale), height: Math.round(h * scale) };
+}
+
+function evenDimensions(w, h) {
+  return { width: w - (w % 2), height: h - (h % 2) };
+}
+
+async function loadPhotoFromFile(file) {
+  const sourceUrl = URL.createObjectURL(file);
+  let source;
+  try {
+    source = await loadImage(sourceUrl, sourceUrl);
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+
+  const naturalW = source.naturalWidth || source.width;
+  const naturalH = source.naturalHeight || source.height;
+  const size = fitDimensions(naturalW, naturalH, CANVAS.workingMaxEdge);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, size.width, size.height);
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/png");
+  });
+  const url = URL.createObjectURL(blob);
+  const image = await loadImage(url, url);
+  return { image, url, width: size.width, height: size.height };
+}
+
+function isEmbeddedPage() {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+function fallbackToCameraPicker() {
+  document.querySelector("#camera-file")?.click();
+}
+
+async function openCamera() {
+  state.photoError = "";
+  const canTryLiveCamera = navigator.mediaDevices?.getUserMedia && allowsBrowserFeature("camera") && !isEmbeddedPage();
+  if (!canTryLiveCamera) {
+    fallbackToCameraPicker();
+    return;
+  }
+
+  let stream = null;
+  let facing = "environment";
+
+  function close() {
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    stream = null;
+    modalRoot.innerHTML = "";
+  }
+
+  async function start() {
+    const video = modalRoot.querySelector("video");
+    const loading = modalRoot.querySelector(".camera-loading");
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    loading.hidden = false;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 960 } },
+        audio: false,
+      });
+      video.srcObject = stream;
+      video.style.transform = facing === "user" ? "scaleX(-1)" : "";
+      await video.play().catch(() => {});
+      loading.hidden = true;
+    } catch (err) {
+      close();
+      fallbackToCameraPicker();
+      state.photoError =
+        err?.name === "SecurityError" || err?.name === "NotAllowedError"
+          ? "Camera access was blocked or denied. Choose a photo from your device instead."
+          : "We couldn't open the live camera. Choose a photo from your device instead.";
+      render();
+    }
+  }
+
+  modalRoot.innerHTML = `
+    <div class="camera-modal" role="dialog" aria-modal="true" aria-label="Take a photo">
+      <div class="camera-box">
+        <video playsinline muted></video>
+        <div class="camera-loading">Starting camera...</div>
+      </div>
+      <div class="camera-actions">
+        <button class="button secondary" type="button" id="camera-cancel">Cancel</button>
+        <button class="snap-button" type="button" id="camera-snap" aria-label="Take photo"><span></span></button>
+        <button class="button secondary" type="button" id="camera-flip">Flip</button>
+      </div>
+      <p class="muted" style="color:#fff">Tap the orange button to snap.</p>
+    </div>
+  `;
+
+  modalRoot.querySelector("#camera-cancel").addEventListener("click", close);
+  modalRoot.querySelector("#camera-flip").addEventListener("click", async () => {
+    facing = facing === "user" ? "environment" : "user";
+    await start();
+  });
+  modalRoot.querySelector("#camera-snap").addEventListener("click", async () => {
+    const video = modalRoot.querySelector("video");
+    if (!video.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (facing === "user") {
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    close();
+    if (blob) await handlePhotoFile(new File([blob], "snapshot.png", { type: "image/png" }));
+  });
+
+  await start();
+}
+
+const mouthUi = {
+  view: { s: 1, tx: 0, ty: 0 },
+  pointers: new Map(),
+  gesture: { type: "none" },
+  draft: null,
+  hintTimer: 0,
+  suppress: false,
+};
+
+function renderStep2() {
+  if (!state.photo) {
+    goTo(1);
+    return;
+  }
+  if (!state.line) state.line = structuredClone(STARTER_LINE);
+  mouthUi.view = { s: 1, tx: 0, ty: 0 };
+  mouthUi.draft = null;
+
+  const body = `
+    <div class="stage-wrap">
+      <div class="stage" id="mouth-stage" style="touch-action:none">
+        <div class="zoom-stage" id="zoom-stage">
+          <canvas class="canvas" id="mouth-canvas"></canvas>
+          <div class="mouth-overlay" id="mouth-overlay"></div>
+        </div>
+        <div class="zoom-controls">
+          <button class="icon-button" type="button" id="zoom-in" aria-label="Zoom in">${zoomInSvg()}</button>
+          <button class="icon-button" type="button" id="zoom-out" aria-label="Zoom out">${zoomOutSvg()}</button>
+          <button class="icon-button" type="button" id="zoom-reset" aria-label="Reset zoom">${resetZoomSvg()}</button>
+        </div>
+        <div class="hint" id="mouth-hint"><span>Drag the pink dots onto the mouth</span></div>
+      </div>
+    </div>
+  `;
+  const nav = `
+    <button class="button secondary" type="button" id="mouth-back">Back</button>
+    <div class="nav-group">
+      <button class="button ghost" type="button" id="mouth-reset">Reset</button>
+      <button class="button large" type="button" id="mouth-next">Next: Record</button>
+    </div>
+  `;
+  stepShell("Place the mouth", "Drag the pink dots onto the mouth. Use + and - to zoom.", body, nav);
+
+  drawPhotoCanvas(document.querySelector("#mouth-canvas"), 0, []);
+  applyMouthView();
+  drawMouthOverlay();
+  bindMouthEvents();
+  mouthUi.hintTimer = window.setTimeout(() => document.querySelector("#mouth-hint")?.classList.add("hidden"), 4000);
+
+  document.querySelector("#mouth-back").addEventListener("click", back);
+  document.querySelector("#mouth-next").addEventListener("click", next);
+  document.querySelector("#mouth-reset").addEventListener("click", () => {
+    state.line = structuredClone(STARTER_LINE);
+    mouthUi.view = { s: 1, tx: 0, ty: 0 };
+    mouthUi.draft = null;
+    applyMouthView();
+    drawMouthOverlay();
+  });
+  document.querySelector("#zoom-in").addEventListener("click", () => zoomButton(1.4));
+  document.querySelector("#zoom-out").addEventListener("click", () => zoomButton(1 / 1.4));
+  document.querySelector("#zoom-reset").addEventListener("click", () => {
+    mouthUi.view = { s: 1, tx: 0, ty: 0 };
+    applyMouthView();
+  });
+}
+
+function zoomInSvg() {
+  return `<svg viewBox="0 0 22 22"><path d="M11 5v12M5 11h12"></path></svg>`;
+}
+
+function zoomOutSvg() {
+  return `<svg viewBox="0 0 22 22"><path d="M5 11h12"></path></svg>`;
+}
+
+function resetZoomSvg() {
+  return `<svg viewBox="0 0 22 22"><path d="M4 9a7 7 0 0 1 12-3l2 2M18 13a7 7 0 0 1-12 3l-2-2"></path><path d="M18 4v4h-4M4 18v-4h4"></path></svg>`;
+}
+
+function bindMouthEvents() {
+  const overlay = document.querySelector("#mouth-overlay");
+  const stage = document.querySelector("#mouth-stage");
+  overlay.addEventListener("pointerdown", onMouthDown);
+  overlay.addEventListener("pointermove", onMouthMove);
+  overlay.addEventListener("pointerup", onMouthUp);
+  overlay.addEventListener("pointercancel", onMouthUp);
+  stage.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoomAbout(event.clientX, event.clientY, mouthUi.view.s * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
+  }, { passive: false });
+}
+
+function midpointNorm(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function isStraight(line) {
+  if (!line.mid) return true;
+  const m = midpointNorm(line.a, line.b);
+  return Math.hypot(line.mid.x - m.x, line.mid.y - m.y) < 0.01;
+}
+
+function clientToNorm(element, x, y) {
+  const rect = element.getBoundingClientRect();
+  return {
+    x: clamp((x - rect.left) / rect.width, 0, 1),
+    y: clamp((y - rect.top) / rect.height, 0, 1),
+  };
+}
+
+function hitMouthHandle(x, y) {
+  const overlay = document.querySelector("#mouth-overlay");
+  const rect = overlay.getBoundingClientRect();
+  const points = [
+    { h: "a", p: state.line.a },
+    { h: "b", p: state.line.b },
+    { h: "mid", p: state.line.mid || midpointNorm(state.line.a, state.line.b) },
+  ];
+  let best = null;
+  let bestD = 30;
+  for (const item of points) {
+    const d = Math.hypot(x - (rect.left + item.p.x * rect.width), y - (rect.top + item.p.y * rect.height));
+    if (d <= bestD) {
+      bestD = d;
+      best = item.h;
+    }
+  }
+  return best;
+}
+
+function onMouthDown(event) {
+  event.preventDefault();
+  document.querySelector("#mouth-hint")?.classList.add("hidden");
+  event.currentTarget.setPointerCapture(event.pointerId);
+  mouthUi.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+  if (mouthUi.pointers.size === 2) {
+    const pts = [...mouthUi.pointers.values()];
+    mouthUi.gesture = {
+      type: "pinch",
+      dist0: Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) || 1,
+      midX0: (pts[0].x + pts[1].x) / 2,
+      midY0: (pts[0].y + pts[1].y) / 2,
+      s0: mouthUi.view.s,
+      tx0: mouthUi.view.tx,
+      ty0: mouthUi.view.ty,
+    };
+    mouthUi.draft = null;
+    drawMouthOverlay();
+    return;
+  }
+
+  if (mouthUi.pointers.size !== 1 || mouthUi.suppress) return;
+  const handle = hitMouthHandle(event.clientX, event.clientY);
+  if (handle) {
+    mouthUi.gesture = { type: "handle", handle };
+  } else if (mouthUi.view.s > 1) {
+    mouthUi.gesture = {
+      type: "pan",
+      tx0: mouthUi.view.tx,
+      ty0: mouthUi.view.ty,
+      x0: event.clientX,
+      y0: event.clientY,
+    };
+  } else {
+    const p = clientToNorm(event.currentTarget, event.clientX, event.clientY);
+    mouthUi.draft = { a: p, b: p, mid: p };
+    mouthUi.gesture = { type: "draw" };
+    drawMouthOverlay();
+  }
+}
+
+function onMouthMove(event) {
+  if (!mouthUi.pointers.has(event.pointerId)) return;
+  mouthUi.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  const g = mouthUi.gesture;
+  const overlay = document.querySelector("#mouth-overlay");
+
+  if (g.type === "pinch" && mouthUi.pointers.size >= 2) {
+    const pts = [...mouthUi.pointers.values()];
+    const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) || 1;
+    const midX = (pts[0].x + pts[1].x) / 2;
+    const midY = (pts[0].y + pts[1].y) / 2;
+    const rect = document.querySelector("#mouth-stage").getBoundingClientRect();
+    const s = clamp(g.s0 * (dist / g.dist0), 1, 4);
+    const fx = g.midX0 - rect.left;
+    const fy = g.midY0 - rect.top;
+    mouthUi.view = clampMouthView(
+      fx - ((fx - g.tx0) / g.s0) * s + (midX - g.midX0),
+      fy - ((fy - g.ty0) / g.s0) * s + (midY - g.midY0),
+      s,
+    );
+    applyMouthView();
+    return;
+  }
+
+  if (mouthUi.pointers.size >= 2) return;
+
+  if (g.type === "draw" && mouthUi.draft) {
+    mouthUi.draft.b = clientToNorm(overlay, event.clientX, event.clientY);
+    mouthUi.draft.mid = midpointNorm(mouthUi.draft.a, mouthUi.draft.b);
+    drawMouthOverlay();
+  } else if (g.type === "handle") {
+    const p = clientToNorm(overlay, event.clientX, event.clientY);
+    if (g.handle === "mid") {
+      state.line.mid = p;
+    } else {
+      state.line[g.handle] = p;
+      if (isStraight(state.line)) state.line.mid = midpointNorm(state.line.a, state.line.b);
+    }
+    drawMouthOverlay();
+  } else if (g.type === "pan") {
+    mouthUi.view = clampMouthView(g.tx0 + event.clientX - g.x0, g.ty0 + event.clientY - g.y0, mouthUi.view.s);
+    applyMouthView();
+  }
+}
+
+function onMouthUp(event) {
+  const wasPinch = mouthUi.gesture.type === "pinch";
+  mouthUi.pointers.delete(event.pointerId);
+
+  if (mouthUi.gesture.type === "draw" && mouthUi.pointers.size === 0 && mouthUi.draft) {
+    const d = mouthUi.draft;
+    const rect = document.querySelector("#mouth-overlay").getBoundingClientRect();
+    const px = Math.hypot((d.b.x - d.a.x) * rect.width, (d.b.y - d.a.y) * rect.height);
+    if (px >= 18) state.line = { a: d.a, b: d.b, mid: midpointNorm(d.a, d.b) };
+    mouthUi.draft = null;
+    drawMouthOverlay();
+  }
+
+  if (mouthUi.pointers.size === 0) {
+    mouthUi.gesture = { type: "none" };
+    mouthUi.suppress = false;
+  } else if (wasPinch) {
+    mouthUi.gesture = { type: "none" };
+    mouthUi.suppress = true;
+  }
+}
+
+function clampMouthView(tx, ty, s) {
+  if (s <= 1) return { s: 1, tx: 0, ty: 0 };
+  const rect = document.querySelector("#mouth-stage").getBoundingClientRect();
+  return {
+    s,
+    tx: clamp(tx, rect.width * (1 - s), 0),
+    ty: clamp(ty, rect.height * (1 - s), 0),
+  };
+}
+
+function zoomAbout(cx, cy, scale) {
+  const rect = document.querySelector("#mouth-stage").getBoundingClientRect();
+  const s0 = mouthUi.view.s;
+  const s = clamp(scale, 1, 4);
+  const px = cx - rect.left;
+  const py = cy - rect.top;
+  mouthUi.view = clampMouthView(
+    px - ((px - mouthUi.view.tx) / s0) * s,
+    py - ((py - mouthUi.view.ty) / s0) * s,
+    s,
+  );
+  applyMouthView();
+}
+
+function zoomButton(factor) {
+  const rect = document.querySelector("#mouth-stage").getBoundingClientRect();
+  zoomAbout(rect.left + rect.width / 2, rect.top + rect.height / 2, mouthUi.view.s * factor);
+}
+
+function applyMouthView() {
+  const zoomStage = document.querySelector("#zoom-stage");
+  if (!zoomStage) return;
+  zoomStage.style.transform = `translate(${mouthUi.view.tx}px, ${mouthUi.view.ty}px) scale(${mouthUi.view.s})`;
+  drawMouthOverlay();
+}
+
+function mouthPath(line) {
+  const a = line.a;
+  const b = line.b;
+  const m = line.mid || midpointNorm(a, b);
+  const cx = (2 * m.x - (a.x + b.x) / 2) * 100;
+  const cy = (2 * m.y - (a.y + b.y) / 2) * 100;
+  return `M ${a.x * 100} ${a.y * 100} Q ${cx} ${cy} ${b.x * 100} ${b.y * 100}`;
+}
+
+function drawMouthOverlay() {
+  const overlay = document.querySelector("#mouth-overlay");
+  if (!overlay || !state.line) return;
+  const guideScale = 1 / mouthUi.view.s;
+  const shown = mouthUi.draft || state.line;
+  const pts = [
+    { h: "a", p: state.line.a, mid: false },
+    { h: "b", p: state.line.b, mid: false },
+    { h: "mid", p: state.line.mid || midpointNorm(state.line.a, state.line.b), mid: true },
+  ];
+  overlay.innerHTML = `
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+      <path d="${mouthPath(shown)}" fill="none" stroke="#fff" stroke-width="${6 * guideScale}" stroke-linecap="round"></path>
+      <path d="${mouthPath(shown)}" fill="none" stroke="#ec4899" stroke-width="${3 * guideScale}" stroke-dasharray="${1 * guideScale} ${3 * guideScale}" stroke-linecap="round"></path>
+    </svg>
+    ${pts.map((item) => `
+      <span class="handle ${item.mid ? "mid" : ""}" style="left:${item.p.x * 100}%;top:${item.p.y * 100}%;transform:translate(-50%,-50%) scale(${guideScale})">
+        ${item.mid ? `<span class="curve-label">curve</span>` : ""}
+      </span>
+    `).join("")}
+  `;
+}
+
+function renderStep3() {
+  const recording = state.recordStatus === "recording";
+  const processing = state.recordStatus === "processing";
+  const body = `
+    <div class="record-card">
+      <div class="record-shell">
+        <span class="record-ring ${recording ? "active" : ""}" id="record-ring"></span>
+        <button class="record-button ${recording ? "recording" : ""}" type="button" id="record-button" ${processing ? "disabled" : ""} aria-label="${recording ? "Stop recording" : "Start recording"}">
+          ${recording ? `<span class="stop-square"></span>` : micSvg()}
+        </button>
+      </div>
+      <div class="timer ${recording ? "recording" : ""}" id="record-timer">${recording ? "0.0s" : recordTimerText()}</div>
+      <input class="hidden-input" id="audio-file" type="file" accept="audio/*">
+      ${!recording && !processing ? `
+        <button class="button secondary" type="button" id="upload-audio">Upload audio instead</button>
+      ` : ""}
+      <div class="nav-group" id="record-playback">
+        ${state.audio && !recording && !processing ? `
+          <button class="button success large" type="button" id="play-recording">${state.recordPlaying ? "Stop" : "Play it back"}</button>
+          <button class="button secondary" type="button" id="clear-recording">Re-record</button>
+          <audio id="record-audio" src="${state.audio.url}"></audio>
+        ` : ""}
+      </div>
+      ${state.recordStatus === "denied" ? `<div class="message error">${escapeHtml(state.recordError || "TalkLine needs your microphone to record. Allow microphone access in your browser, then try again.")}</div>` : ""}
+      ${state.recordStatus === "error" ? `<div class="message error">${escapeHtml(state.recordError || "Something went wrong saving that recording. Tap the button to try again.")}</div>` : ""}
+    </div>
+  `;
+  const nav = `
+    <button class="button secondary" type="button" id="record-back">Back</button>
+    <button class="button large" type="button" id="record-next" ${!state.audio || recording ? "disabled" : ""}>Next: Stickers</button>
+  `;
+  stepShell("Record your voice", "Tap the big button and say something fun!", body, nav);
+
+  document.querySelector("#record-back").addEventListener("click", back);
+  document.querySelector("#record-next").addEventListener("click", next);
+  document.querySelector("#record-button").addEventListener("click", recording ? stopRecording : startRecording);
+  const audioInput = document.querySelector("#audio-file");
+  document.querySelector("#upload-audio")?.addEventListener("click", () => audioInput.click());
+  audioInput.addEventListener("change", async () => {
+    const file = audioInput.files?.[0];
+    audioInput.value = "";
+    if (file) await handleAudioFile(file);
+  });
+  document.querySelector("#clear-recording")?.addEventListener("click", clearAudio);
+  document.querySelector("#play-recording")?.addEventListener("click", toggleRecordedPlayback);
+  const audio = document.querySelector("#record-audio");
+  if (audio) {
+    audio.addEventListener("play", () => {
+      state.recordPlaying = true;
+      renderStep3();
+    });
+    audio.addEventListener("pause", () => {
+      state.recordPlaying = false;
+      renderStep3();
+    });
+    audio.addEventListener("ended", () => {
+      state.recordPlaying = false;
+      renderStep3();
+    });
+  }
+}
+
+function micSvg() {
+  return `<svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path><path d="M12 18v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg>`;
+}
+
+function recordTimerText() {
+  if (state.recordStatus === "processing") return "Getting your voice ready...";
+  if (state.audio) return `Got it! ${state.audio.durationSec.toFixed(1)}s recorded`;
+  return `Up to ${AUDIO.maxSeconds} seconds.`;
+}
+
+function getAudioContext() {
+  if (!sharedAudioContext) {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    sharedAudioContext = new Ctor();
+  }
+  if (sharedAudioContext.state === "suspended") sharedAudioContext.resume();
+  return sharedAudioContext;
+}
+
+function pickAudioMime() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4;codecs=mp4a.40.2",
+    "audio/mp4",
+    "audio/ogg;codecs=opus",
+  ];
+  if (typeof MediaRecorder === "undefined") return "";
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+}
+
+async function startRecording() {
+  state.recordError = "";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    state.recordStatus = "denied";
+    state.recordError = "This browser does not have microphone recording. Upload audio instead, or try opening the file in Chrome, Edge, or Safari.";
+    renderStep3();
+    return;
+  }
+  if (!allowsBrowserFeature("microphone")) {
+    state.recordStatus = "denied";
+    state.recordError = permissionPolicyMessage("microphone");
+    renderStep3();
+    return;
+  }
+  state.recordStatus = "processing";
+  renderStep3();
+  try {
+    const audioContext = getAudioContext();
+    recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = pickAudioMime();
+    recorder = new MediaRecorder(recordStream, mime ? { mimeType: mime } : undefined);
+    recordChunks = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) recordChunks.push(event.data);
+    };
+    recorder.onstop = () => finalizeRecording(recorder.mimeType || mime || "audio/webm");
+
+    const src = audioContext.createMediaStreamSource(recordStream);
+    recordAnalyser = audioContext.createAnalyser();
+    recordAnalyser.fftSize = 1024;
+    src.connect(recordAnalyser);
+
+    recorder.start();
+    recordStartedAt = performance.now();
+    state.recordElapsed = 0;
+    state.recordStatus = "recording";
+    renderStep3();
+    recordRaf = requestAnimationFrame(meterLoop);
+    recordTimer = window.setInterval(() => {
+      const elapsed = (performance.now() - recordStartedAt) / 1000;
+      state.recordElapsed = elapsed;
+      updateRecordingUi();
+      if (elapsed >= AUDIO.maxSeconds) stopRecording();
+    }, 100);
+  } catch (err) {
+    cleanupRecording();
+    state.recordStatus = "denied";
+    state.recordError =
+      err?.name === "SecurityError" || err?.name === "NotAllowedError"
+        ? "Microphone access was blocked or denied. Open this HTML file directly in a browser tab and allow microphone access, or upload audio instead."
+        : "TalkLine needs your microphone to record. Allow microphone access in your browser, then try again, or upload audio instead.";
+    renderStep3();
+  }
+}
+
+async function handleAudioFile(file) {
+  state.recordStatus = "processing";
+  state.recordError = "";
+  state.recordPlaying = false;
+  renderStep3();
+  try {
+    const buffer = await decodeAudio(file);
+    const url = URL.createObjectURL(file);
+    if (state.audio?.url) URL.revokeObjectURL(state.audio.url);
+    state.audio = {
+      blob: file,
+      url,
+      buffer,
+      durationSec: Math.min(buffer.duration, AUDIO.maxSeconds),
+      mimeType: file.type || "audio/*",
+    };
+    state.envelope = computeEnvelope(buffer);
+    state.recordStatus = "idle";
+  } catch {
+    state.recordStatus = "error";
+    state.recordError = "That audio file could not be opened. Try a WAV, MP3, M4A, OGG, or WebM file.";
+  }
+  renderStep3();
+}
+
+function meterLoop() {
+  if (!recordAnalyser) return;
+  const buf = new Float32Array(recordAnalyser.fftSize);
+  recordAnalyser.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  const rms = Math.sqrt(sum / buf.length);
+  state.recordLevel = state.recordLevel * 0.6 + Math.min(1, rms * 4) * 0.4;
+  updateRecordingUi();
+  recordRaf = requestAnimationFrame(meterLoop);
+}
+
+function updateRecordingUi() {
+  const timer = document.querySelector("#record-timer");
+  const ring = document.querySelector("#record-ring");
+  if (timer && state.recordStatus === "recording") {
+    const remaining = Math.max(0, AUDIO.maxSeconds - state.recordElapsed);
+    timer.innerHTML = `${state.recordElapsed.toFixed(1)}s <span class="muted">${remaining.toFixed(0)}s left</span>`;
+  }
+  if (ring) {
+    const size = 10.5 + state.recordLevel * 3.8;
+    ring.style.width = `${size}rem`;
+    ring.style.height = `${size}rem`;
+  }
+}
+
+function stopRecording() {
+  if (recorder && recorder.state !== "inactive") {
+    state.recordStatus = "processing";
+    recorder.stop();
+  }
+  cleanupRecording();
+  renderStep3();
+}
+
+function cleanupRecording() {
+  cancelAnimationFrame(recordRaf);
+  if (recordTimer) window.clearInterval(recordTimer);
+  recordTimer = 0;
+  if (recordStream) recordStream.getTracks().forEach((track) => track.stop());
+  recordStream = null;
+  recordAnalyser = null;
+  state.recordLevel = 0;
+}
+
+async function finalizeRecording(mimeType) {
+  try {
+    const blob = new Blob(recordChunks, { type: mimeType });
+    const buffer = await decodeAudio(blob);
+    const url = URL.createObjectURL(blob);
+    if (state.audio?.url) URL.revokeObjectURL(state.audio.url);
+    state.audio = {
+      blob,
+      url,
+      buffer,
+      durationSec: Math.min(buffer.duration, AUDIO.maxSeconds),
+      mimeType,
+    };
+    state.envelope = computeEnvelope(buffer);
+    state.recordStatus = "idle";
+  } catch {
+    state.recordStatus = "error";
+  }
+  renderStep3();
+}
+
+async function decodeAudio(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  return await getAudioContext().decodeAudioData(arrayBuffer.slice(0));
+}
+
+function clearAudio() {
+  if (state.audio?.url) URL.revokeObjectURL(state.audio.url);
+  state.audio = null;
+  state.envelope = null;
+  state.recordPlaying = false;
+  state.recordError = "";
+  state.recordStatus = "idle";
+  renderStep3();
+}
+
+function toggleRecordedPlayback() {
+  const audio = document.querySelector("#record-audio");
+  if (!audio) return;
+  if (state.recordPlaying) {
+    audio.pause();
+    audio.currentTime = 0;
+  } else {
+    audio.play();
+  }
+}
+
+function toMono(buffer) {
+  const channels = buffer.numberOfChannels;
+  if (channels === 1) return buffer.getChannelData(0);
+  const len = buffer.length;
+  const out = new Float32Array(len);
+  for (let c = 0; c < channels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = 0; i < len; i++) out[i] += data[i];
+  }
+  for (let i = 0; i < len; i++) out[i] /= channels;
+  return out;
+}
+
+function computeEnvelope(buffer) {
+  const mono = toMono(buffer);
+  const frameCount = Math.max(1, Math.ceil(buffer.duration * ANIMATION.fps));
+  const windowSize = Math.max(1, Math.floor(buffer.sampleRate / ANIMATION.fps));
+  const rms = new Float32Array(frameCount);
+
+  for (let f = 0; f < frameCount; f++) {
+    const start = f * windowSize;
+    const end = Math.min(start + windowSize, mono.length);
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += mono[i] * mono[i];
+    rms[f] = Math.sqrt(sum / Math.max(1, end - start));
+  }
+
+  const sorted = Float32Array.from(rms).sort();
+  const pIdx = clamp(Math.floor(ANIMATION.normalizePercentile * (sorted.length - 1)), 0, sorted.length - 1);
+  const ref = Math.max(sorted[pIdx], 1e-4);
+  const env = new Float32Array(frameCount);
+  let prev = 0;
+
+  for (let f = 0; f < frameCount; f++) {
+    let v = clamp(rms[f] / ref, 0, 1);
+    v = Math.pow(v, ANIMATION.gamma);
+    let target = 0;
+    if (v >= ANIMATION.silenceGate) {
+      const ranged = (v - ANIMATION.silenceGate) / (1 - ANIMATION.silenceGate);
+      target = ANIMATION.openFloor + (1 - ANIMATION.openFloor) * ranged;
+    }
+    const coeff = target > prev ? ANIMATION.attack : ANIMATION.release;
+    prev = prev + coeff * (target - prev);
+    env[f] = clamp(prev, 0, 1);
+  }
+  return env;
+}
+
+function envelopeAt(env, timeSec) {
+  if (!env?.length) return 0;
+  const idx = clamp(Math.floor(timeSec * ANIMATION.fps), 0, env.length - 1);
+  return env[idx];
+}
+
+function renderStep4() {
+  if (!state.photo) {
+    goTo(1);
+    return;
+  }
+  const body = `
+    <div class="stage-wrap">
+      <div class="stage" id="sticker-stage">
+        <canvas class="canvas" id="sticker-canvas"></canvas>
+        <div class="sticker-layer" id="sticker-layer"></div>
+      </div>
+      ${state.stickers.length ? "" : `<p class="muted" style="text-align:center;margin-top:.75rem">Stickers are optional - add as many as you like, or skip ahead.</p>`}
+    </div>
+    <div class="tray">
+      <div class="sticker-tabs">
+        ${STICKER_PACKS.map((pack) => `<button class="pill ${state.stickerPack === pack.id ? "active" : ""}" type="button" data-pack="${pack.id}">${pack.label}</button>`).join("")}
+        <button class="pill own" type="button" id="custom-sticker">+ Your own</button>
+      </div>
+      <input class="hidden-input" id="custom-sticker-file" type="file" accept="image/png,image/webp,image/*">
+      <div class="sticker-grid">
+        ${getActiveStickerPack().defs.map((def) => `
+          <button class="sticker-choice" type="button" data-sticker="${def.key}" aria-label="Add ${escapeHtml(def.label)}" title="${escapeHtml(def.label)}">
+            <img src="${svgToDataUrl(def.svg)}" alt="${escapeHtml(def.label)}" draggable="false">
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+  const nav = `
+    <button class="button secondary" type="button" id="sticker-back">Back</button>
+    <button class="button large" type="button" id="sticker-next">Next: Preview</button>
+  `;
+  stepShell("Add stickers", "Tap a sticker to add it. Drag to move, pull the corner to resize.", body, nav);
+
+  drawPhotoCanvas(document.querySelector("#sticker-canvas"), 0, []);
+  renderStickerLayer();
+  preloadBuiltins();
+
+  document.querySelector("#sticker-stage").addEventListener("pointerdown", (event) => {
+    if (event.target.id === "sticker-stage") {
+      state.selectedSticker = null;
+      renderStickerLayer();
+    }
+  });
+  document.querySelectorAll("[data-pack]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.stickerPack = button.dataset.pack;
+      renderStep4();
+    });
+  });
+  document.querySelectorAll("[data-sticker]").forEach((button) => {
+    button.addEventListener("click", () => addSticker({
+      type: state.stickerPack === "faces" ? "emoji" : "shape",
+      key: button.dataset.sticker,
+      x: 0.5,
+      y: 0.42,
+      scale: 0.24,
+      rot: 0,
+    }));
+  });
+  const customInput = document.querySelector("#custom-sticker-file");
+  document.querySelector("#custom-sticker").addEventListener("click", () => customInput.click());
+  customInput.addEventListener("change", () => {
+    const file = customInput.files?.[0];
+    customInput.value = "";
+    if (file) {
+      const src = URL.createObjectURL(file);
+      addSticker({ type: "custom", key: `custom-${Date.now()}`, src, x: 0.5, y: 0.42, scale: 0.28, rot: 0 });
+    }
+  });
+  document.querySelector("#sticker-back").addEventListener("click", back);
+  document.querySelector("#sticker-next").addEventListener("click", next);
+}
+
+function getActiveStickerPack() {
+  return STICKER_PACKS.find((pack) => pack.id === state.stickerPack) || STICKER_PACKS[0];
+}
+
+function addSticker(sticker) {
+  const id = `s${++stickerSeq}`;
+  state.stickers.push({ id, ...sticker });
+  state.selectedSticker = id;
+  renderStickersCacheKey = "";
+  renderStickerLayer();
+}
+
+function updateSticker(id, patch) {
+  const sticker = state.stickers.find((item) => item.id === id);
+  if (sticker) Object.assign(sticker, patch);
+  renderStickersCacheKey = "";
+}
+
+function removeSticker(id) {
+  const sticker = state.stickers.find((item) => item.id === id);
+  if (sticker?.type === "custom" && sticker.src) URL.revokeObjectURL(sticker.src);
+  state.stickers = state.stickers.filter((item) => item.id !== id);
+  state.selectedSticker = null;
+  renderStickersCacheKey = "";
+  renderStickerLayer();
+}
+
+function bringStickerToFront(id) {
+  const sticker = state.stickers.find((item) => item.id === id);
+  if (!sticker) return;
+  state.stickers = [...state.stickers.filter((item) => item.id !== id), sticker];
+}
+
+function stickerSrc(sticker) {
+  if (sticker.type === "custom" && sticker.src) return sticker.src;
+  const def = STICKER_BY_KEY.get(sticker.key);
+  return def ? svgToDataUrl(def.svg) : "";
+}
+
+function renderStickerLayer() {
+  const layer = document.querySelector("#sticker-layer");
+  if (!layer) return;
+  layer.innerHTML = state.stickers.map((sticker) => `
+    <div
+      class="sticker-item ${state.selectedSticker === sticker.id ? "selected" : ""}"
+      data-sticker-id="${sticker.id}"
+      style="left:${sticker.x * 100}%;top:${sticker.y * 100}%;width:${sticker.scale * 100}%;transform:translate(-50%,-50%) rotate(${sticker.rot}rad)"
+    >
+      <img src="${stickerSrc(sticker)}" alt="" draggable="false">
+      ${state.selectedSticker === sticker.id ? `
+        <button class="sticker-tool delete" type="button" data-delete="${sticker.id}" aria-label="Delete sticker" style="transform:rotate(${-sticker.rot}rad)">${xSvg()}</button>
+        <button class="sticker-tool resize" type="button" data-resize="${sticker.id}" aria-label="Resize sticker" style="transform:rotate(${-sticker.rot}rad)">${resizeSvg()}</button>
+      ` : ""}
+    </div>
+  `).join("");
+
+  layer.querySelectorAll(".sticker-item").forEach(bindStickerItem);
+  layer.querySelectorAll("[data-delete]").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      removeSticker(button.dataset.delete);
+    });
+  });
+  layer.querySelectorAll("[data-resize]").forEach((button) => bindStickerResize(button));
+}
+
+function xSvg() {
+  return `<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"></path></svg>`;
+}
+
+function resizeSvg() {
+  return `<svg viewBox="0 0 24 24"><path d="M9 3H3v6M3 3l7 7M15 21h6v-6M21 21l-7-7"></path></svg>`;
+}
+
+function bindStickerItem(item) {
+  let gesture = null;
+  let activeElement = item;
+  const id = item.dataset.stickerId;
+  item.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".sticker-tool")) return;
+    const sticker = state.stickers.find((s) => s.id === id);
+    if (!sticker) return;
+    state.selectedSticker = id;
+    bringStickerToFront(id);
+    renderStickerLayer();
+    const fresh = document.querySelector(`[data-sticker-id="${id}"]`);
+    activeElement = fresh;
+    fresh.setPointerCapture(event.pointerId);
+    const rect = document.querySelector("#sticker-stage").getBoundingClientRect();
+    gesture = {
+      x0: event.clientX,
+      y0: event.clientY,
+      startX: sticker.x,
+      startY: sticker.y,
+      rect,
+    };
+    fresh.addEventListener("pointermove", move);
+    fresh.addEventListener("pointerup", end);
+    fresh.addEventListener("pointercancel", end);
+  });
+
+  function move(event) {
+    if (!gesture) return;
+    const sticker = state.stickers.find((s) => s.id === id);
+    if (!sticker) return;
+    sticker.x = clamp(gesture.startX + (event.clientX - gesture.x0) / gesture.rect.width, 0, 1);
+    sticker.y = clamp(gesture.startY + (event.clientY - gesture.y0) / gesture.rect.height, 0, 1);
+    activeElement.style.left = `${sticker.x * 100}%`;
+    activeElement.style.top = `${sticker.y * 100}%`;
+    renderStickersCacheKey = "";
+  }
+
+  function end() {
+    gesture = null;
+  }
+}
+
+function bindStickerResize(button) {
+  let gesture = null;
+  const id = button.dataset.resize;
+  button.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    const sticker = state.stickers.find((s) => s.id === id);
+    if (!sticker) return;
+    state.selectedSticker = id;
+    button.setPointerCapture(event.pointerId);
+    const rect = document.querySelector("#sticker-stage").getBoundingClientRect();
+    const cx = rect.left + sticker.x * rect.width;
+    const cy = rect.top + sticker.y * rect.height;
+    gesture = {
+      startScale: sticker.scale,
+      startRot: sticker.rot,
+      startDist: Math.hypot(event.clientX - cx, event.clientY - cy) || 1,
+      startAngle: Math.atan2(event.clientY - cy, event.clientX - cx),
+      rect,
+      cx,
+      cy,
+    };
+  });
+  button.addEventListener("pointermove", (event) => {
+    if (!gesture) return;
+    const dist = Math.hypot(event.clientX - gesture.cx, event.clientY - gesture.cy) || 1;
+    const angle = Math.atan2(event.clientY - gesture.cy, event.clientX - gesture.cx);
+    const sticker = state.stickers.find((s) => s.id === id);
+    if (!sticker) return;
+    sticker.scale = clamp(gesture.startScale * (dist / gesture.startDist), 0.06, 1.4);
+    sticker.rot = gesture.startRot + (angle - gesture.startAngle);
+    renderStickersCacheKey = "";
+    const item = document.querySelector(`[data-sticker-id="${id}"]`);
+    if (item) {
+      item.style.width = `${sticker.scale * 100}%`;
+      item.style.transform = `translate(-50%,-50%) rotate(${sticker.rot}rad)`;
+      item.querySelectorAll(".sticker-tool").forEach((tool) => {
+        tool.style.transform = `rotate(${-sticker.rot}rad)`;
+      });
+    }
+  });
+  button.addEventListener("pointerup", () => {
+    gesture = null;
+  });
+  button.addEventListener("pointercancel", () => {
+    gesture = null;
+  });
+}
+
+async function renderStep5() {
+  if (!state.photo || !state.line || !state.audio || !state.envelope) {
+    goTo(Math.min(state.maxStep, state.audio ? 4 : 3));
+    return;
+  }
+
+  const done = state.exportState.phase === "done" && state.resultUrl;
+  const busy = state.exportState.phase === "rendering";
+  const supported = canExport();
+  const body = `
+    <div class="stage-wrap">
+      ${done ? `
+        <div class="stage"><video src="${state.resultUrl}" controls autoplay muted loop playsinline></video></div>
+        <p class="message success">Saved to your device. Tap the volume button to hear it.</p>
+      ` : `
+        <div class="stage">
+          <canvas class="canvas" id="preview-canvas"></canvas>
+          ${!state.previewPlaying && !busy ? `<button class="play-overlay" type="button" id="play-preview" aria-label="Play preview"><span class="play-dot">${playSvg()}</span></button>` : ""}
+        </div>
+        <audio id="preview-audio" src="${state.audio.url}"></audio>
+        ${!busy ? `<div class="nav-group" style="justify-content:center;margin-top:1rem"><button class="button success" type="button" id="play-preview-button">${state.previewPlaying ? "Replay" : "Play preview"}</button></div>` : ""}
+      `}
+      ${busy ? `
+        <div class="progress">
+          <div class="progress-head"><span>${escapeHtml(state.exportState.message)}</span><span>${Math.round(state.exportState.progress * 100)}%</span></div>
+          <div class="progress-track"><div class="progress-fill" style="width:${Math.max(3, state.exportState.progress * 100)}%"></div></div>
+          <button class="link-button" type="button" id="cancel-export" style="display:block;margin:.8rem auto 0">Cancel</button>
+        </div>
+      ` : ""}
+      ${state.exportState.phase === "error" ? `<div class="message error">${escapeHtml(state.exportState.error || "Something went wrong making your video.")}</div>` : ""}
+      ${!supported ? `<div class="message error">This browser cannot save videos. Try Chrome, Edge, or Safari.</div>` : ""}
+    </div>
+  `;
+
+  const nav = done ? `
+    <button class="button secondary" type="button" id="back-to-preview">Back to preview</button>
+    <button class="button success large" type="button" id="make-another">Make another</button>
+  ` : `
+    <button class="button secondary" type="button" id="preview-back" ${busy ? "disabled" : ""}>Back</button>
+    <button class="button large" type="button" id="download-video" ${busy || !supported ? "disabled" : ""}>${busy ? "Making your video..." : "Download Video"}</button>
+  `;
+
+  stepShell(done ? "Your talking photo is ready!" : "Preview & save", done ? "Want to make another?" : "Press play to see it talk, then save your video.", body, nav);
+
+  if (!done) {
+    await drawPreviewStill();
+    document.querySelector("#play-preview")?.addEventListener("click", playPreview);
+    document.querySelector("#play-preview-button")?.addEventListener("click", playPreview);
+    const audio = document.querySelector("#preview-audio");
+    audio?.addEventListener("play", startPreviewAnimation);
+    audio?.addEventListener("pause", stopPreview);
+    audio?.addEventListener("ended", stopPreview);
+  }
+
+  document.querySelector("#preview-back")?.addEventListener("click", back);
+  document.querySelector("#download-video")?.addEventListener("click", exportVideo);
+  document.querySelector("#cancel-export")?.addEventListener("click", () => {
+    exportAbort = true;
+  });
+  document.querySelector("#back-to-preview")?.addEventListener("click", () => {
+    state.exportState = { phase: "idle", progress: 0, message: "" };
+    stopPreview();
+    renderStep5();
+  });
+  document.querySelector("#make-another")?.addEventListener("click", resetProject);
+}
+
+function playSvg() {
+  return `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>`;
+}
+
+function canExport() {
+  return Boolean(HTMLCanvasElement.prototype.captureStream && window.MediaRecorder);
+}
+
+async function drawPreviewStill() {
+  const canvas = document.querySelector("#preview-canvas");
+  if (!canvas) return;
+  const stickers = await getRenderStickers();
+  drawPhotoCanvas(canvas, 0, stickers);
+}
+
+function playPreview() {
+  const audio = document.querySelector("#preview-audio");
+  if (!audio) return;
+  audio.currentTime = 0;
+  audio.play();
+}
+
+async function startPreviewAnimation() {
+  state.previewPlaying = true;
+  const canvas = document.querySelector("#preview-canvas");
+  const audio = document.querySelector("#preview-audio");
+  const stickers = await getRenderStickers();
+
+  const tick = () => {
+    if (!canvas || !audio) return;
+    drawPhotoCanvas(canvas, envelopeAt(state.envelope, audio.currentTime), stickers);
+    previewRaf = requestAnimationFrame(tick);
+  };
+  cancelAnimationFrame(previewRaf);
+  tick();
+  document.querySelector("#play-preview")?.remove();
+}
+
+function stopPreview() {
+  cancelAnimationFrame(previewRaf);
+  state.previewPlaying = false;
+  const audio = document.querySelector("#preview-audio");
+  if (audio) {
+    audio.pause();
+    audio.currentTime = 0;
+  }
+  const canvas = document.querySelector("#preview-canvas");
+  if (canvas) drawPreviewStill();
+}
+
+async function exportVideo() {
+  if (!canExport()) return;
+  stopPreview();
+  exportAbort = false;
+  if (state.resultUrl) URL.revokeObjectURL(state.resultUrl);
+  state.resultUrl = "";
+  state.resultFilename = "";
+  state.resultType = "";
+  state.exportState = { phase: "rendering", progress: 0, message: "Getting ready..." };
+  renderStep5();
+
+  try {
+    const blob = await exportWithMediaRecorder((progress, message) => {
+      state.exportState = { phase: "rendering", progress, message };
+      const fill = document.querySelector(".progress-fill");
+      const head = document.querySelector(".progress-head");
+      if (fill) fill.style.width = `${Math.max(3, progress * 100)}%`;
+      if (head) head.innerHTML = `<span>${escapeHtml(message)}</span><span>${Math.round(progress * 100)}%</span>`;
+    });
+    const url = URL.createObjectURL(blob);
+    const isMp4 = blob.type.includes("mp4");
+    state.resultUrl = url;
+    state.resultFilename = `talking-photo.${isMp4 ? "mp4" : "webm"}`;
+    state.resultType = isMp4 ? "mp4" : "webm";
+    state.exportState = { phase: "done", progress: 1, message: "Saved!" };
+    triggerDownload(url, state.resultFilename);
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      state.exportState = { phase: "idle", progress: 0, message: "" };
+    } else {
+      state.exportState = {
+        phase: "error",
+        progress: 0,
+        message: "",
+        error: "Something went wrong making your video. Try again.",
+      };
+    }
+  }
+  renderStep5();
+}
+
+async function exportWithMediaRecorder(onProgress) {
+  const fitted = fitDimensions(state.photo.width, state.photo.height, CANVAS.exportMaxEdge);
+  const size = evenDimensions(fitted.width, fitted.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const stickers = await getRenderStickers();
+  const scene = {
+    photo: state.photo.image,
+    width: size.width,
+    height: size.height,
+    line: state.line,
+    stickers,
+  };
+  const audioContext = getAudioContext();
+  await audioContext.resume();
+  const dest = audioContext.createMediaStreamDestination();
+  const source = audioContext.createBufferSource();
+  source.buffer = state.audio.buffer;
+  source.connect(dest);
+
+  const canvasStream = canvas.captureStream(ANIMATION.fps);
+  const stream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
+  const mime = [
+    'video/mp4;codecs="avc1.42E01E, mp4a.40.2"',
+    "video/mp4",
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ].find((type) => MediaRecorder.isTypeSupported(type)) || "video/webm";
+  const mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
+  const chunks = [];
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data.size) chunks.push(event.data);
+  };
+
+  return await new Promise((resolve, reject) => {
+    let raf = 0;
+    let stopped = false;
+    const startTime = audioContext.currentTime;
+    const duration = Math.min(state.audio.buffer.duration, AUDIO.maxSeconds);
+
+    function finish(error) {
+      if (stopped) return;
+      stopped = true;
+      cancelAnimationFrame(raf);
+      stream.getTracks().forEach((track) => track.stop());
+      try {
+        source.stop();
+      } catch {
+        /* source may already be stopped */
+      }
+      if (error) reject(error);
+    }
+
+    function tick() {
+      if (exportAbort) {
+        mediaRecorder.stop();
+        finish(new DOMException("Export cancelled", "AbortError"));
+        return;
+      }
+      const elapsed = audioContext.currentTime - startTime;
+      drawFrame(ctx, scene, envelopeAt(state.envelope, elapsed));
+      onProgress(Math.min(1, elapsed / duration), "Recording your video...");
+      if (elapsed >= duration) {
+        mediaRecorder.stop();
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    }
+
+    mediaRecorder.onstop = () => {
+      if (stopped && exportAbort) return;
+      cancelAnimationFrame(raf);
+      stream.getTracks().forEach((track) => track.stop());
+      resolve(new Blob(chunks, { type: mime }));
+    };
+    mediaRecorder.onerror = () => {
+      finish(new Error("Recording failed"));
+    };
+
+    mediaRecorder.start(100);
+    source.start();
+    tick();
+  });
+}
+
+function triggerDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function drawPhotoCanvas(canvas, openAmount, stickers = []) {
+  if (!canvas || !state.photo) return;
+  canvas.width = state.photo.width;
+  canvas.height = state.photo.height;
+  canvas.style.aspectRatio = `${state.photo.width} / ${state.photo.height}`;
+  const ctx = canvas.getContext("2d");
+  drawFrame(ctx, {
+    photo: state.photo.image,
+    width: state.photo.width,
+    height: state.photo.height,
+    line: state.line,
+    stickers,
+  }, openAmount);
+}
+
+function toPx(point, w, h) {
+  return { x: point.x * w, y: point.y * h };
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function hingeGeometry(line, w, h) {
+  const a = toPx(line.a, w, h);
+  const b = toPx(line.b, w, h);
+  const pivot = midpoint(a, b);
+  const len = Math.max(dist(a, b), 1e-3);
+  const dir = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+  let normal = { x: -dir.y, y: dir.x };
+  if (normal.y < 0) normal = { x: -normal.x, y: -normal.y };
+  return { a, b, pivot, dir, normal, len };
+}
+
+function sampleMouthCurve(line, w, h, samples = 16) {
+  const a = toPx(line.a, w, h);
+  const b = toPx(line.b, w, h);
+  const midPoint = line.mid ? toPx(line.mid, w, h) : midpoint(a, b);
+  const control = { x: 2 * midPoint.x - (a.x + b.x) / 2, y: 2 * midPoint.y - (a.y + b.y) / 2 };
+  const pts = [];
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const u = 1 - t;
+    pts.push({
+      x: u * u * a.x + 2 * u * t * control.x + t * t * b.x,
+      y: u * u * a.y + 2 * u * t * control.y + t * t * b.y,
+    });
+  }
+  return pts;
+}
+
+function jawPose(openAmount, lineLenPx) {
+  const a = clamp(openAmount, 0, 1);
+  return {
+    drop: a * ANIMATION.maxDropFraction * lineLenPx,
+    angle: (a * ANIMATION.maxAngleDeg * Math.PI) / 180,
+  };
+}
+
+function drawFrame(ctx, scene, openAmount) {
+  const { photo, width: w, height: h, line } = scene;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(photo, 0, 0, w, h);
+
+  if (line) {
+    const { a, b, pivot, dir, normal, len } = hingeGeometry(line, w, h);
+    const { drop, angle } = jawPose(openAmount, len);
+
+    if (drop > 0.5) {
+      const samples = 16;
+      const pts = sampleMouthCurve(line, w, h, samples);
+      const grad = ctx.createLinearGradient(pivot.x, pivot.y, pivot.x + normal.x * drop * 2, pivot.y + normal.y * drop * 2);
+      grad.addColorStop(0, "#150a0d");
+      grad.addColorStop(0.5, "#2c0f13");
+      grad.addColorStop(1, "#3d1117");
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i <= samples; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      for (let i = samples; i >= 0; i--) {
+        const t = i / samples;
+        const droop = Math.sin(t * Math.PI) * drop * 0.6;
+        ctx.lineTo(pts[i].x + normal.x * (drop + droop), pts[i].y + normal.y * (drop + droop));
+      }
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      const chinDrop = len * 0.95;
+      ctx.save();
+      ctx.translate(normal.x * drop, normal.y * drop);
+      ctx.translate(pivot.x, pivot.y);
+      ctx.rotate(ANIMATION.rotationSign * angle);
+      ctx.translate(-pivot.x, -pivot.y);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.bezierCurveTo(
+        b.x + dir.x * len * 0.15 + normal.x * chinDrop,
+        b.y + dir.y * len * 0.15 + normal.y * chinDrop,
+        a.x - dir.x * len * 0.15 + normal.x * chinDrop,
+        a.y - dir.y * len * 0.15 + normal.y * chinDrop,
+        a.x,
+        a.y,
+      );
+      ctx.closePath();
+      ctx.clip();
+      ctx.drawImage(photo, 0, 0, w, h);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.strokeStyle = `rgba(0,0,0,${Math.min(0.5, (drop / len) * 1.6)})`;
+      ctx.lineWidth = Math.max(2, len * 0.05);
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  drawStickers(ctx, scene);
+}
+
+function drawStickers(ctx, scene) {
+  for (const sticker of scene.stickers || []) {
+    const { placement, image, aspect } = sticker;
+    const boxW = placement.scale * scene.width;
+    const boxH = boxW / (aspect || 1);
+    const cx = placement.x * scene.width;
+    const cy = placement.y * scene.height;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(placement.rot);
+    ctx.drawImage(image, -boxW / 2, -boxH / 2, boxW, boxH);
+    ctx.restore();
+  }
+}
+
+async function getRenderStickers() {
+  const key = JSON.stringify(state.stickers.map((s) => [s.id, s.key, s.src || "", s.x, s.y, s.scale, s.rot]));
+  if (key === renderStickersCacheKey) return renderStickersCache;
+  renderStickersCache = await Promise.all(state.stickers.map(async (placement) => {
+    const src = stickerSrc(placement);
+    const image = await loadImage(src, placement.type === "custom" ? src : `builtin:${placement.key}`);
+    const aspect = (image.naturalWidth || image.width || 1) / (image.naturalHeight || image.height || 1);
+    return { placement, image, aspect };
+  }));
+  renderStickersCacheKey = key;
+  return renderStickersCache;
+}
+
+const imageCache = new Map();
+
+const svg = (inner) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">${inner}</svg>`;
+
+const SHAPE_STICKERS = [
+  { key: "star", label: "Star", svg: svg(`<path d="M50 6 61 38 95 38 67 58 78 92 50 71 22 92 33 58 5 38 39 38Z" fill="#fbbf24" stroke="#f59e0b" stroke-width="4" stroke-linejoin="round"/>`) },
+  { key: "heart", label: "Heart", svg: svg(`<path d="M50 88C18 64 8 46 8 32 8 18 19 10 31 10c8 0 15 4 19 11 4-7 11-11 19-11 12 0 23 8 23 22 0 14-10 32-42 56Z" fill="#fb6f92" stroke="#e11d6f" stroke-width="4" stroke-linejoin="round"/>`) },
+  { key: "sparkle", label: "Sparkle", svg: svg(`<path d="M50 8C53 32 68 47 92 50 68 53 53 68 50 92 47 68 32 53 8 50 32 47 47 32 50 8Z" fill="#67e8f9" stroke="#06b6d4" stroke-width="3.5" stroke-linejoin="round"/><circle cx="80" cy="22" r="6" fill="#a5f3fc"/>`) },
+  { key: "sunglasses", label: "Cool shades", svg: svg(`<g stroke="#111827" stroke-width="4" stroke-linejoin="round"><rect x="8" y="38" width="36" height="26" rx="12" fill="#1f2937"/><rect x="56" y="38" width="36" height="26" rx="12" fill="#1f2937"/><path d="M44 46c4-4 8-4 12 0" fill="none" stroke-linecap="round"/></g><path d="M14 44l24 4M62 44l24 4" stroke="#60a5fa" stroke-width="4" stroke-linecap="round"/>`) },
+  { key: "tophat", label: "Top hat", svg: svg(`<g stroke="#111827" stroke-width="4" stroke-linejoin="round"><rect x="28" y="14" width="44" height="52" rx="6" fill="#1f2937"/><rect x="10" y="62" width="80" height="14" rx="7" fill="#111827"/><rect x="28" y="50" width="44" height="12" fill="#ef4444" stroke="none"/></g>`) },
+  { key: "crown", label: "Crown", svg: svg(`<path d="M12 76 18 32 38 54 50 24 62 54 82 32 88 76Z" fill="#fcd34d" stroke="#d97706" stroke-width="4" stroke-linejoin="round"/><rect x="12" y="76" width="76" height="12" rx="4" fill="#f59e0b" stroke="#d97706" stroke-width="4"/><circle cx="38" cy="58" r="5" fill="#ef4444"/><circle cx="62" cy="58" r="5" fill="#3b82f6"/><circle cx="50" cy="50" r="5" fill="#10b981"/>`) },
+  { key: "speech", label: "Speech bubble", svg: svg(`<path d="M14 16h72a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H42l-18 16 3-16h-13a8 8 0 0 1-8-8V24a8 8 0 0 1 8-8Z" fill="#ffffff" stroke="#7c3aed" stroke-width="5" stroke-linejoin="round"/><circle cx="34" cy="44" r="5" fill="#7c3aed"/><circle cx="50" cy="44" r="5" fill="#7c3aed"/><circle cx="66" cy="44" r="5" fill="#7c3aed"/>`) },
+  { key: "mustache", label: "Mustache", svg: svg(`<path d="M50 44c-6-10-18-16-30-12-8 3-12 9-12 9s2-2 10-1c-9 4-12 14-6 20 7 7 22 4 30-9 8 13 23 16 30 9 6-6 3-16-6-20 8-1 10 1 10 1s-4-6-12-9c-12-4-24 2-30 12Z" fill="#3f2a14" stroke="#2a1a0a" stroke-width="3"/>`) },
+  { key: "bow", label: "Bow", svg: svg(`<g fill="#fb6f92" stroke="#e11d6f" stroke-width="4" stroke-linejoin="round"><path d="M50 50 16 30c-5-3-11 1-11 7v26c0 6 6 10 11 7L50 50Z"/><path d="M50 50 84 30c5-3 11 1 11 7v26c0 6-6 10-11 7L50 50Z"/><circle cx="50" cy="50" r="10"/></g>`) },
+  { key: "bolt", label: "Lightning", svg: svg(`<path d="M56 6 22 56h22l-10 38 42-54H52l12-34Z" fill="#facc15" stroke="#eab308" stroke-width="4" stroke-linejoin="round"/>`) },
+  { key: "rainbow", label: "Rainbow", svg: svg(`<g fill="none" stroke-linecap="round"><path d="M10 78a40 40 0 0 1 80 0" stroke="#ef4444" stroke-width="9"/><path d="M19 78a31 31 0 0 1 62 0" stroke="#f59e0b" stroke-width="9"/><path d="M28 78a22 22 0 0 1 44 0" stroke="#10b981" stroke-width="9"/><path d="M37 78a13 13 0 0 1 26 0" stroke="#3b82f6" stroke-width="9"/></g>`) },
+  { key: "flower", label: "Flower", svg: svg(`<g fill="#f472b6" stroke="#db2777" stroke-width="3"><circle cx="50" cy="24" r="14"/><circle cx="76" cy="42" r="14"/><circle cx="66" cy="72" r="14"/><circle cx="34" cy="72" r="14"/><circle cx="24" cy="42" r="14"/></g><circle cx="50" cy="50" r="13" fill="#fde047" stroke="#eab308" stroke-width="3"/>`) },
+];
+
+const faceBase = (features, fill = "#ffd83d") => svg(`<circle cx="50" cy="50" r="44" fill="${fill}" stroke="#e6a700" stroke-width="4"/>${features}`);
+
+const FACE_STICKERS = [
+  { key: "face-happy", label: "Happy", svg: faceBase(`<circle cx="35" cy="42" r="6" fill="#3a2a00"/><circle cx="65" cy="42" r="6" fill="#3a2a00"/><path d="M32 62c8 12 28 12 36 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/>`) },
+  { key: "face-laugh", label: "Laughing", svg: faceBase(`<path d="M28 40c4-5 12-5 16 0" fill="none" stroke="#3a2a00" stroke-width="5" stroke-linecap="round"/><path d="M56 40c4-5 12-5 16 0" fill="none" stroke="#3a2a00" stroke-width="5" stroke-linecap="round"/><path d="M28 58c6 16 38 16 44 0Z" fill="#7a1f1f"/><path d="M30 60c8-4 32-4 40 0" fill="#ff5d73"/>`) },
+  { key: "face-cool", label: "Cool", svg: faceBase(`<path d="M16 40h30a6 6 0 0 1 6 6c0 8-6 12-15 12s-15-4-15-12a6 6 0 0 1-6-6Z" fill="#1f2937"/><path d="M54 40h30a6 6 0 0 1-6 6c0 8-6 12-15 12s-15-4-15-12a6 6 0 0 1 6-6Z" fill="#1f2937"/><rect x="44" y="40" width="12" height="5" rx="2" fill="#1f2937"/><path d="M36 70c8 6 20 6 28 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/>`) },
+  { key: "face-love", label: "Heart eyes", svg: faceBase(`<path d="M35 34c4-6 14-3 14 4 0 5-7 9-14 14-7-5-14-9-14-14 0-7 10-10 14-4Z" fill="#ef4444"/><path d="M65 34c4-6 14-3 14 4 0 5-7 9-14 14-7-5-14-9-14-14 0-7 10-10 14-4Z" fill="#ef4444"/><path d="M34 66c8 10 24 10 32 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/>`) },
+  { key: "face-silly", label: "Silly", svg: faceBase(`<circle cx="35" cy="42" r="6" fill="#3a2a00"/><path d="M58 38c6-4 14-4 18 2" fill="none" stroke="#3a2a00" stroke-width="5" stroke-linecap="round"/><path d="M34 62c8 10 24 10 32 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/><path d="M52 64c0 0 2 18 12 18s10-14 10-14Z" fill="#ff5d73" stroke="#d6275a" stroke-width="3"/>`) },
+  { key: "face-star", label: "Star eyes", svg: faceBase(`<path d="M35 32 39 42 49 42 41 48 44 58 35 52 26 58 29 48 21 42 31 42Z" fill="#3b82f6"/><path d="M65 32 69 42 79 42 71 48 74 58 65 52 56 58 59 48 51 42 61 42Z" fill="#3b82f6"/><path d="M34 66c8 10 24 10 32 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/>`) },
+  { key: "face-wow", label: "Surprised", svg: faceBase(`<circle cx="35" cy="40" r="7" fill="#3a2a00"/><circle cx="65" cy="40" r="7" fill="#3a2a00"/><ellipse cx="50" cy="68" rx="11" ry="14" fill="#7a1f1f"/>`) },
+  { key: "face-sad", label: "Sad", svg: faceBase(`<circle cx="35" cy="44" r="6" fill="#3a2a00"/><circle cx="65" cy="44" r="6" fill="#3a2a00"/><path d="M32 74c8-12 28-12 36 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/><path d="M66 50c4 6 8 14 8 20a8 8 0 0 1-16 0c0-6 4-14 8-20Z" fill="#67c1ff"/>`) },
+  { key: "face-wink", label: "Wink", svg: faceBase(`<path d="M28 42c4-5 12-5 16 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/><circle cx="65" cy="42" r="6" fill="#3a2a00"/><path d="M34 64c8 10 24 10 32 0" fill="none" stroke="#3a2a00" stroke-width="6" stroke-linecap="round"/>`) },
+  { key: "face-sleepy", label: "Sleepy", svg: faceBase(`<path d="M26 44h18M56 44h18" stroke="#3a2a00" stroke-width="5" stroke-linecap="round"/><circle cx="50" cy="66" r="7" fill="#7a1f1f"/><path d="M70 18h16l-16 16h16" fill="none" stroke="#7c3aed" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`) },
+];
+
+const STICKER_PACKS = [
+  { id: "shapes", label: "Shapes", defs: SHAPE_STICKERS },
+  { id: "faces", label: "Faces", defs: FACE_STICKERS },
+];
+
+const STICKER_BY_KEY = new Map([...SHAPE_STICKERS, ...FACE_STICKERS].map((def) => [def.key, def]));
+
+function svgToDataUrl(svgText) {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svgText)}`;
+}
+
+function preloadBuiltins() {
+  for (const def of [...SHAPE_STICKERS, ...FACE_STICKERS]) {
+    loadImage(svgToDataUrl(def.svg), `builtin:${def.key}`).catch(() => {});
+  }
+}
+
+preloadBuiltins();
+render();
+
+    </script>
+  </body>
+</html>

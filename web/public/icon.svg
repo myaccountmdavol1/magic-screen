@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fde68a"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="scr" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath>
+  </defs>
+  <!-- Full-bleed tile: iOS/Android apply their own corner mask; rx keeps it rounded on desktop -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g clip-path="url(#tile)">
+    <circle cx="420" cy="92" r="70" fill="#fff" opacity=".25"/>
+    <circle cx="70" cy="450" r="90" fill="#f59e0b" opacity=".25"/>
+  </g>
+  <g stroke-linejoin="round" stroke-linecap="round">
+    <!-- antennae -->
+    <path d="M206 132L170 76M306 132L342 76" fill="none" stroke="#6d28d9" stroke-width="16"/>
+    <circle cx="166" cy="70" r="20" fill="#f472b6" stroke="#be185d" stroke-width="10"/>
+    <circle cx="346" cy="70" r="20" fill="#38bdf8" stroke="#0369a1" stroke-width="10"/>
+    <!-- feet -->
+    <path d="M168 392v34M344 392v34" stroke="#6d28d9" stroke-width="22"/>
+    <!-- TV body -->
+    <rect x="86" y="128" width="340" height="272" rx="64" fill="#a78bfa" stroke="#6d28d9" stroke-width="14"/>
+    <!-- green screen face -->
+    <rect x="122" y="162" width="268" height="204" rx="44" fill="url(#scr)" stroke="#15803d" stroke-width="10"/>
+    <path d="M146 196q10-18 34-20" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="12"/>
+    <!-- face -->
+    <ellipse cx="208" cy="250" rx="18" ry="24" fill="#1e1b4b"/>
+    <ellipse cx="304" cy="250" rx="18" ry="24" fill="#1e1b4b"/>
+    <circle cx="214" cy="242" r="7" fill="#fff"/>
+    <circle cx="310" cy="242" r="7" fill="#fff"/>
+    <circle cx="170" cy="296" r="16" fill="#f9a8d4" opacity=".9"/>
+    <circle cx="342" cy="296" r="16" fill="#f9a8d4" opacity=".9"/>
+    <path d="M218 300q38 40 76 0z" fill="#be185d" stroke="#1e1b4b" stroke-width="10"/>
+    <!-- sparkle -->
+    <path d="M430 196q0 34 34 34q-34 0-34 34q0-34-34-34q34 0 34-34z" fill="#fff" stroke="#f59e0b" stroke-width="8"/>
+    <path d="M70 150q0 22 22 22q-22 0-22 22q0-22-22-22q22 0 22-22z" fill="#fff" stroke="#f59e0b" stroke-width="7"/>
+  </g>
+</svg>

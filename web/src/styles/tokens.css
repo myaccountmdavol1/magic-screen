@@ -1,0 +1,62 @@
+/* Design tokens — adopted verbatim from Talkline (apphive.us/talkline), plus green-screen additions. */
+:root {
+  --grape-50: #eef6ff;
+  --grape-100: #d9ecff;
+  --grape-200: #b6dbff;
+  --grape-400: #5aa9f8;
+  --grape-500: #2f8fef;
+  --grape-600: #1f6fd4;
+  --grape-700: #1b4f9c;
+  --sun-100: #fff3cf;
+  --sun-300: #ffd86b;
+  --sun-400: #ffc83d;
+  --sun-500: #ffb703;
+  --sun-edge: #d98c00;
+  --tang-400: #fb923c;
+  --tang-500: #f97316;
+  --tang-600: #ea580c;
+  --bubble-400: #f472b6;
+  --bubble-500: #ec4899;
+  --bubble-edge: #be185d;
+  --mint-400: #34d399;
+  --mint-500: #10b981;
+  --mint-edge: #0f8d65;
+  --sky: #38bdf8;
+  --screen-green: #22c55e; /* green-screen accent: the "Me" layer */
+  --screen-green-edge: #15803d;
+
+  --text: var(--grape-700);
+  --text-muted: rgba(27, 79, 156, 0.62);
+  --text-soft: rgba(27, 79, 156, 0.72);
+
+  --shadow: 0 18px 50px rgba(27, 79, 156, 0.12);
+  --shadow-card: 0 12px 30px rgba(27, 79, 156, 0.1);
+  --shadow-stage: 0 15px 35px rgba(27, 79, 156, 0.16);
+  --shadow-icon: 0 5px 15px rgba(27, 79, 156, 0.18);
+  --shadow-tile: 0 5px 12px rgba(27, 79, 156, 0.1);
+
+  --radius-pill: 999px;
+  --radius-panel: 2rem;
+  --radius-card: 1.5rem;
+  --radius-tile: 1rem;
+
+  --font-body: 'Quicksand', ui-rounded, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Baloo 2', 'Quicksand', ui-rounded, system-ui, sans-serif;
+
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --touch-min: 4rem; /* 64px minimum kid touch target */
+}
+
+@keyframes pop-in {
+  0% { opacity: 0; transform: scale(0.86); }
+  60% { transform: scale(1.03); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

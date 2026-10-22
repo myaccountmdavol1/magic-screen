@@ -1,0 +1,785 @@
+/* Make flow + the five steps. Talkline look; tokens only. */
+
+.make {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.make-step {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  animation: pop-in 280ms var(--ease-pop) backwards; /* see .screen-view in global.css */
+}
+
+/* Tablet/desktop: each step sits on Talkline's frosted panel under the stepper.
+   Phones stay edge-to-edge so the stage gets every pixel (and the sticky nav bar's
+   bleed margins keep mirroring the app-shell padding). */
+@media (min-width: 640px) {
+  .make-step {
+    position: relative;
+    isolation: isolate;
+    padding: 1.25rem 1.5rem 1.5rem;
+    border-radius: var(--radius-panel);
+    background: rgba(255, 255, 255, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.68);
+    box-shadow: var(--shadow);
+  }
+  .make-step::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    pointer-events: none;
+  }
+  .make-step .nav-row {
+    margin-top: auto;
+    padding-top: 1.25rem;
+    /* If a step is taller than the screen (iPad portrait Stickers, short laptops),
+       Back/Next float at the bottom edge instead of hiding below the fold. When the
+       step fits, sticky has no effect and the row sits in its normal place. */
+    position: sticky;
+    z-index: 20;
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+    pointer-events: none;
+  }
+  .make-step .nav-row > * {
+    pointer-events: auto;
+  }
+}
+
+/* Short landscape screens (iPad landscape, laptops): tighten the chrome above the stage
+   so the panel, a big stage and the Back/Next row all fit without scrolling. */
+@media (min-width: 1024px) and (max-height: 960px) {
+  .make {
+    gap: 0.6rem;
+  }
+  .make .stepper {
+    margin-bottom: 0;
+  }
+  .make-step {
+    padding-top: 0.9rem;
+  }
+  .make-step .step-header {
+    margin-bottom: 0.75rem;
+  }
+  .make-step .step-header h1 {
+    font-size: 2rem;
+  }
+  .make-step .step-header p {
+    margin-top: 0.15rem;
+  }
+  .make-step .nav-row {
+    padding-top: 1rem;
+  }
+}
+
+/* ---------- 1 World ---------- */
+
+.world-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+@media (min-width: 640px) {
+  .world-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .world-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.world-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: var(--touch-min);
+  padding: 0.45rem 0.45rem 0.6rem;
+  border: 0;
+  border-radius: var(--radius-card);
+  color: #fff;
+  box-shadow: var(--shadow-tile), 0 4px 0 rgba(27, 79, 156, 0.18);
+  outline: 0 solid var(--grape-500);
+  outline-offset: 3px;
+  cursor: pointer;
+  transition: transform 140ms ease, outline-width 140ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.world-tile:active {
+  transform: scale(0.97);
+}
+
+.world-tile.selected {
+  outline-width: 6px;
+  animation: select-bounce 420ms var(--ease-pop);
+}
+
+/* Shared "you picked me!" bounce for tiles and cards. */
+@keyframes select-bounce {
+  0% { transform: scale(1); }
+  35% { transform: scale(0.94); }
+  70% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+
+.world-thumb {
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.world-thumb img,
+.world-thumb video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.world-name {
+  margin-top: 0.45rem;
+  font-family: var(--font-display);
+  font-size: clamp(1rem, 2.4vw, 1.2rem);
+  font-weight: 800;
+  line-height: 1.1;
+  text-align: center;
+  text-shadow: 0 2px 0 rgba(27, 79, 156, 0.35);
+}
+
+.world-check {
+  position: absolute;
+  top: -0.6rem;
+  right: -0.6rem;
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border: 3px solid #fff;
+  border-radius: var(--radius-pill);
+  background: var(--grape-500);
+  color: #fff;
+  box-shadow: 0 3px 0 var(--grape-600);
+  animation: check-bounce 420ms var(--ease-pop) both;
+}
+
+@keyframes check-bounce {
+  0% { transform: scale(0); }
+  60% { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+
+.world-upload {
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--tang-600);
+  border: 4px dashed rgba(251, 146, 60, 0.56);
+  box-shadow: none;
+}
+
+.world-upload .world-name {
+  text-shadow: none;
+}
+
+.world-upload .world-thumb {
+  display: grid;
+  place-items: center;
+  background: rgba(251, 146, 60, 0.14);
+}
+
+.world-upload-icon {
+  display: grid;
+  place-items: center;
+}
+
+/* ---------- Shared stage overlays ---------- */
+
+.stage-badge {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-pill);
+  background: rgba(27, 79, 156, 0.78);
+  color: #fff;
+  font-weight: 900;
+  font-size: 0.9rem;
+}
+
+/* ---------- 2 Me: big icon + label tools ---------- */
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+@media (min-width: 640px) and (max-width: 1023px) {
+  .tool-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .tool-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.tool-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 6rem;
+  padding: 0.6rem 0.4rem;
+  border: 0;
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--grape-600);
+  font-family: var(--font-body);
+  font-weight: 800;
+  font-size: 0.95rem;
+  line-height: 1.1;
+  box-shadow: 0 4px 0 var(--grape-200);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, background 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tool-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--grape-200);
+}
+
+.tool-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tool-icon {
+  display: grid;
+  width: 3.25rem;
+  height: 3.25rem;
+  place-items: center;
+  border-radius: var(--radius-tile);
+  background: var(--grape-100);
+}
+
+.tool-btn.tone-orange { color: var(--tang-600); }
+.tool-btn.tone-orange .tool-icon { background: rgba(251, 146, 60, 0.22); }
+.tool-btn.tone-mint { color: var(--mint-edge); }
+.tool-btn.tone-mint .tool-icon { background: rgba(52, 211, 153, 0.22); }
+.tool-btn.tone-sun { color: var(--sun-edge); }
+.tool-btn.tone-sun .tool-icon { background: var(--sun-100); }
+
+.tool-btn.active {
+  background: var(--sun-400);
+  color: var(--grape-700);
+  box-shadow: 0 4px 0 var(--sun-edge);
+}
+
+.tool-btn.active .tool-icon {
+  background: rgba(255, 255, 255, 0.6);
+  animation: tool-wiggle 900ms ease-in-out infinite;
+}
+
+@keyframes tool-wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg); }
+  75% { transform: rotate(10deg); }
+}
+
+/* ---------- 3 Stickers tray ---------- */
+
+.sticker-tray {
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.72);
+  padding: 0.9rem;
+  box-shadow: var(--shadow-card);
+}
+
+.sticker-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+.pill {
+  min-height: 3rem;
+  padding: 0.45rem 1rem;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--grape-100);
+  color: var(--grape-600);
+  font-family: var(--font-body);
+  font-weight: 900;
+  font-size: 1rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pill.active {
+  background: var(--grape-500);
+  color: #fff;
+  box-shadow: 0 3px 0 var(--grape-600);
+}
+
+.sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+@media (min-width: 640px) and (max-width: 1023px) {
+  .sticker-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .sticker-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* Side-by-side layout: the tray never grows taller than the stage (its grid scrolls
+   instead), so Back/Next stay on screen on iPad landscape. The aside is the query
+   container (not .stage-layout) because size containment makes an element the
+   containing block for fixed-position modals, and the stage can show those.
+   Stage height = 65% of the row x 9/16; the aside is the other 35% minus the 1.5rem
+   gap, so stage height = (aside width + 1.5rem) x 0.65 / 0.35 x 0.5625 ≈ x1.0446. */
+@media (min-width: 1024px) {
+  .layout-stage .stage-aside {
+    container-type: inline-size;
+  }
+  .stage-aside .sticker-tray {
+    max-height: calc((100cqw + 1.5rem) * 1.0446);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-top: 0;
+  }
+  /* Pack tabs stay reachable while the stickers scroll under them. */
+  .stage-aside .sticker-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0 -0.9rem 0.85rem;
+    padding: 0.9rem 0.9rem 0.5rem;
+    background: rgba(255, 255, 255, 0.94);
+  }
+}
+
+/* Wide desktops: a wider tool column fits 4 across, so the tray is shorter than the stage. */
+@media (min-width: 1280px) {
+  .sticker-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.sticker-choice {
+  aspect-ratio: 1;
+  min-height: var(--touch-min);
+  border: 0;
+  border-radius: var(--radius-tile);
+  background: #fff;
+  padding: 0.45rem;
+  box-shadow: var(--shadow-tile);
+  cursor: pointer;
+  transition: transform 140ms var(--ease-pop);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sticker-choice:active {
+  transform: scale(0.9);
+}
+
+.sticker-choice img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.sticker-clear {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+
+/* ---------- 4 Snap / Film ---------- */
+
+.action-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.action-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.choice-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 7.5rem;
+  padding: 0.9rem;
+  border: 4px dashed var(--grape-200);
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--grape-600);
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: transform 140ms ease, background 160ms ease, border-color 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.choice-card:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.choice-card:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.choice-icon {
+  display: grid;
+  width: 4rem;
+  height: 4rem;
+  place-items: center;
+  border-radius: var(--radius-tile);
+}
+
+.choice-title {
+  font-size: 1.15rem;
+  font-weight: 900;
+}
+
+.choice-card.photo { border-color: rgba(251, 146, 60, 0.56); color: var(--tang-600); }
+.choice-card.photo .choice-icon { background: rgba(251, 146, 60, 0.22); }
+.choice-card.video { border-color: rgba(236, 72, 153, 0.45); color: var(--bubble-500); }
+.choice-card.video .choice-icon { background: rgba(236, 72, 153, 0.16); }
+
+.choice-card.selected {
+  border-style: solid;
+  background: #fff;
+  animation: select-bounce 420ms var(--ease-pop);
+}
+.choice-card.photo.selected { border-color: var(--tang-500); }
+.choice-card.video.selected { border-color: var(--bubble-500); }
+
+/* Hero button (Talkline record button): 160px circle. */
+.hero-shell {
+  position: relative;
+  display: grid;
+  width: 12rem;
+  height: 12rem;
+  place-items: center;
+}
+
+.hero-progress {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.hero-progress circle {
+  fill: none;
+  stroke-width: 8;
+  stroke-linecap: round;
+}
+
+.hero-progress .track { stroke: var(--grape-100); }
+.hero-progress .fill {
+  stroke: var(--bubble-500);
+  transition: stroke-dashoffset 200ms linear;
+}
+
+.hero-ring {
+  position: absolute;
+  width: 10.5rem;
+  height: 10.5rem;
+  border-radius: var(--radius-pill);
+  background: rgba(236, 72, 153, 0.25);
+  animation: hero-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes hero-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.12); opacity: 0.5; }
+}
+
+.hero-btn {
+  position: relative;
+  display: grid;
+  width: 10rem;
+  height: 10rem;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--tang-500);
+  color: #fff;
+  box-shadow: 0 7px 0 var(--tang-600);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, background 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hero-btn:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow: 0 4px 0 var(--tang-600);
+}
+
+.hero-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Idle "tap me!" breathing + a soft glow ring, only while the button is waiting.
+   Stops during countdown/recording so it never competes with the timer ring. Only the
+   icon and the halo move: the button's own box stays still, so taps (and Playwright's
+   "element is stable" check) always land. */
+.hero-btn:not(.recording):not(:disabled) > * {
+  animation: hero-breathe 2.4s ease-in-out infinite;
+}
+
+.hero-btn:not(.recording):not(:disabled)::before {
+  content: '';
+  position: absolute;
+  inset: -0.6rem;
+  border-radius: inherit;
+  border: 4px solid rgba(249, 115, 22, 0.35);
+  animation: hero-halo 2.4s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes hero-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+
+@keyframes hero-halo {
+  0% { opacity: 0.9; transform: scale(0.92); }
+  70%, 100% { opacity: 0; transform: scale(1.18); }
+}
+
+.hero-btn.recording {
+  background: var(--bubble-500);
+  box-shadow: 0 7px 0 var(--bubble-edge);
+}
+
+.hero-btn.recording:active {
+  box-shadow: 0 4px 0 var(--bubble-edge);
+}
+
+.record-dot {
+  width: 4rem;
+  height: 4rem;
+  border: 6px solid rgba(255, 255, 255, 0.55);
+  border-radius: var(--radius-pill);
+  background: #fff;
+  background-clip: padding-box;
+}
+
+.stop-square {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 0.55rem;
+  background: #fff;
+}
+
+.timer {
+  font-family: var(--font-display);
+  font-size: 1.9rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.timer.recording { color: var(--bubble-500); }
+
+.timer-max {
+  font-size: 1.1rem;
+  color: var(--text-muted);
+}
+
+/* Countdown + flash + REC badge sit on top of the stage. */
+.countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(27, 79, 156, 0.22);
+}
+
+.countdown-num {
+  font-family: var(--font-display);
+  font-size: clamp(6rem, 22vw, 14rem);
+  font-weight: 900;
+  line-height: 1;
+  color: #fff;
+  -webkit-text-stroke: 6px var(--tang-500);
+  paint-order: stroke fill;
+  text-shadow: 0 10px 0 var(--tang-600);
+  animation: countdown-pop 900ms var(--ease-pop) both;
+}
+
+@keyframes countdown-pop {
+  0% { opacity: 0; transform: scale(0.3); }
+  30% { opacity: 1; transform: scale(1.15); }
+  70% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.9); }
+}
+
+.shutter-flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  animation: shutter 380ms ease-out both;
+}
+
+@keyframes shutter {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.rec-badge {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: var(--radius-pill);
+  background: var(--bubble-500);
+  color: #fff;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 3px 0 var(--bubble-edge);
+}
+
+.rec-dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: var(--radius-pill);
+  background: #fff;
+  animation: rec-blink 1s steps(2, start) infinite;
+}
+
+@keyframes rec-blink {
+  to { visibility: hidden; }
+}
+
+/* iPad portrait: cards + hero side by side under the stage. */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .action-tools {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: 'choices hero' 'timer hero';
+    align-items: center;
+    column-gap: 1.25rem;
+  }
+  .action-choices { grid-area: choices; }
+  .hero-shell { grid-area: hero; }
+  .timer { grid-area: timer; text-align: center; }
+}
+
+/* Phones: photo/video stacked beside a smaller hero so the big button is visible
+   without scrolling (it otherwise lands under the sticky Back/Next bar). */
+@media (max-width: 639px) {
+  .action-tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'choices hero' 'timer timer';
+    align-items: center;
+    column-gap: 0.85rem;
+    row-gap: 0.5rem;
+  }
+  .action-choices { grid-area: choices; grid-template-columns: 1fr; gap: 0.5rem; }
+  .choice-card { flex-direction: row; min-height: 3.75rem; padding: 0.4rem 0.6rem; border-width: 3px; }
+  .choice-icon { width: 2.75rem; height: 2.75rem; }
+  .hero-shell { grid-area: hero; width: 8.5rem; height: 8.5rem; }
+  .hero-btn { width: 7.25rem; height: 7.25rem; }
+  .hero-ring { width: 7.75rem; height: 7.75rem; }
+  .timer { grid-area: timer; text-align: center; }
+}
+
+/* ---------- 5 Keep ---------- */
+
+.keep {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.keep-result {
+  position: relative;
+  /* Cap by height too so Save stays on screen on iPad landscape. */
+  width: min(100%, 52rem, calc((100dvh - 29rem) * 16 / 9));
+  min-width: min(100%, 18rem);
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--grape-50);
+  outline: 4px solid #fff;
+  box-shadow: var(--shadow-stage);
+}
+
+.keep-result img,
+.keep-result video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: var(--grape-700);
+}
+
+.keep-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.85rem;
+  width: 100%;
+}
+
+@media (max-width: 639px) {
+  .keep-actions .btn-xl {
+    flex: 1 1 100%;
+  }
+}
+
+.keep-empty {
+  display: grid;
+  place-items: center;
+  min-height: 12rem;
+  color: var(--grape-200);
+}
