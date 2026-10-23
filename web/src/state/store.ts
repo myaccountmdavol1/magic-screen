@@ -12,12 +12,13 @@ import type {
 
 export const STEPS: StepId[] = ['world', 'me', 'stickers', 'action', 'keep']
 
-// VITE_QUIET=1 starts a silent build for grown-ups previewing the app; kids get audio by default.
+// Spoken prompts and sound effects start off; a teacher turns them on in Teacher settings.
+// VITE_QUIET=1 additionally forces them off, even over a saved choice (silent previews).
 const QUIET = import.meta.env.VITE_QUIET === '1'
 
 export const DEFAULT_SETTINGS: Settings = {
-  voice: !QUIET,
-  sounds: !QUIET,
+  voice: false,
+  sounds: false,
   mirror: true,
   facing: 'user',
   resolution: '720p',
