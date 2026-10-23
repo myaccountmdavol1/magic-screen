@@ -23,6 +23,7 @@ import {
 } from './deviceTier'
 import type { BackgroundChoice, PlacedSticker, RGB, Settings } from '../types'
 import { getBackgroundImage, getFrontImage, getFrontUrl, getStickerImage, loadImage } from '../assets/svg'
+import { getAnimatedWorld } from '../assets/animatedWorlds'
 
 export interface StageApi {
   /** The live compositor (null until the canvas is mounted and WebGL is ready). */
@@ -103,7 +104,20 @@ export function newId(prefix = 'c'): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
 }
 
-export type BackgroundSource = HTMLImageElement | HTMLVideoElement | string | null
+export type BackgroundSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | string | null
+
+/** What loadBackgroundSource hands the Stage. */
+export interface LoadedBackground {
+  source: BackgroundSource
+  dispose: () => void
+  /** Moving worlds: draw the next frame. The Stage calls it right before compositor.render(). */
+  tick?: (now: number) => void
+  /** Moving worlds: freeze (true) / resume (false) while the stage is hidden. */
+  pause?: (paused: boolean) => void
+}
+
+/** Moving worlds that reuse a still world's front layer (the sea's coral reef). */
+const ANIMATED_FRONT: Record<string, string> = { 'sea-moving': 'sea' }
 
 /**
  * Turn the store's BackgroundChoice into something the Compositor can draw.
@@ -112,17 +126,34 @@ export type BackgroundSource = HTMLImageElement | HTMLVideoElement | string | nu
  */
 /** C5: the chosen world's front layer (desk, fence...), or null when it has none. */
 export async function loadFrontOverlay(bg: BackgroundChoice | null): Promise<HTMLImageElement | null> {
-  const id = bg?.kind === 'builtin' ? (bg.builtinId ?? bg.id) : null
+  const id =
+    bg?.kind === 'builtin'
+      ? (bg.builtinId ?? bg.id)
+      : bg?.kind === 'animated'
+        ? (ANIMATED_FRONT[bg.animatedId ?? ''] ?? null)
+        : null
   if (!id || !getFrontUrl(id)) return null
   return getFrontImage(id)
 }
 
-export async function loadBackgroundSource(
-  bg: BackgroundChoice | null,
-): Promise<{ source: BackgroundSource; dispose: () => void }> {
-  const none = { source: null, dispose: () => {} }
+export async function loadBackgroundSource(bg: BackgroundChoice | null): Promise<LoadedBackground> {
+  const none: LoadedBackground = { source: null, dispose: () => {} }
   if (!bg) return none
   switch (bg.kind) {
+    case 'animated': {
+      const world = getAnimatedWorld(bg.animatedId ?? bg.id)
+      if (!world) return none
+      // 1280x720 is plenty for a background (the compositor cover-fits it).
+      const inst = world.create(1280, 720)
+      await inst.ready
+      inst.frame(performance.now())
+      return {
+        source: inst.canvas,
+        dispose: () => inst.destroy(),
+        tick: (now) => inst.frame(now),
+        pause: (p) => (p ? inst.stop() : inst.start()),
+      }
+    }
     case 'builtin':
       return { source: await getBackgroundImage(bg.builtinId ?? bg.id), dispose: () => {} }
     case 'image':
@@ -139,6 +170,7 @@ export async function loadBackgroundSource(
       v.autoplay = true
       v.preload = 'auto'
       v.crossOrigin = 'anonymous'
+      if (bg.poster) v.poster = bg.poster
       const loaded = new Promise<void>((resolve, reject) => {
         v.addEventListener('loadeddata', () => resolve(), { once: true })
         v.addEventListener('error', () => reject(new Error('Could not load the video world.')), { once: true })
@@ -153,6 +185,10 @@ export async function loadBackgroundSource(
       if (v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) await loaded
       return {
         source: v,
+        pause: (p) => {
+          if (p) v.pause()
+          else v.play().catch(() => {})
+        },
         dispose: () => {
           v.pause()
           v.removeAttribute('src')
@@ -161,6 +197,7 @@ export async function loadBackgroundSource(
       }
     }
   }
+  return none
 }
 
 /** Map placed stickers to the image list Compositor.setStickers expects. */

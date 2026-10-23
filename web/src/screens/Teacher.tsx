@@ -6,13 +6,19 @@ import {
   deleteAllCreations,
   deleteCreation,
   deleteCreationForever,
+  deleteWorld,
   listCreations,
   listDeletedCreations,
+  listWorlds,
+  MY_WORLDS_CAP,
+  renameWorld,
   restoreCreation,
+  saveWorld,
   TRASH_DAYS,
 } from '../lib/storage'
+import { niceWorldName, prepareWorldFile } from '../lib/worlds'
 import { playSound } from '../lib/sound'
-import type { Creation, RGB, Settings } from '../types'
+import type { Creation, RGB, SavedWorld, SavedWorldScope, Settings } from '../types'
 import { Panel } from '../components/Panel'
 import { Button } from '../components/Button'
 import { Icon, type IconName } from '../components/Icon'
@@ -20,6 +26,7 @@ import { ConfirmDialog } from '../components/ParentGate'
 import { toast } from '../components/Toast'
 
 const MEDIAPIPE_URL = 'https://ai.google.dev/edge/mediapipe'
+const FOOTAGE_LICENSES_URL = `${import.meta.env.BASE_URL}worlds/LICENSES.md`
 
 /* ---------- small helpers ---------- */
 
@@ -590,6 +597,209 @@ function CreationsCard() {
   )
 }
 
+function WorldThumb({ w }: { w: SavedWorld }) {
+  return w.thumbDataUrl ? (
+    <img src={w.thumbDataUrl} alt="" className="t-creation-thumb" draggable={false} />
+  ) : (
+    <span className="t-creation-thumb t-world-thumb-empty" aria-hidden="true">
+      <Icon name={w.media === 'video' ? 'video' : 'image'} size={22} />
+    </span>
+  )
+}
+
+/** Saved worlds of one kind, re-read after every change. */
+function useWorldList(scope: SavedWorldScope) {
+  const [list, setList] = useState<SavedWorld[] | null>(null)
+  const refresh = () =>
+    listWorlds(scope)
+      .then(setList)
+      .catch(() => setList((prev) => prev ?? []))
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope])
+  return { list, refresh }
+}
+
+/**
+ * Class worlds: a grown-up adds the lesson's picture or video once, and it shows first
+ * on every child's World step ("Class worlds" row). Kept on this device only.
+ */
+function ClassWorldsCard() {
+  const { list, refresh } = useWorldList('class')
+  const [busy, setBusy] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const add = async (file: File | undefined) => {
+    if (!file) return
+    setBusy(true)
+    try {
+      const prep = await prepareWorldFile(file)
+      if (!prep.ok) {
+        toast(prep.message.replace(/^Grown-ups: /, ''))
+        return
+      }
+      const fallback = prep.media === 'video' ? 'Class video' : 'Class world'
+      await saveWorld(file, { scope: 'class', name: niceWorldName(file.name, fallback), thumbDataUrl: prep.thumb })
+      playSound('success')
+      toast('Added! Kids see it first on the World step.')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not add it')
+    } finally {
+      await refresh()
+      setBusy(false)
+    }
+  }
+
+  const remove = async (w: SavedWorld) => {
+    playSound('pop')
+    setBusy(true)
+    try {
+      await deleteWorld(w.id)
+      toast('Class world deleted')
+    } catch {
+      toast('Could not delete it')
+    } finally {
+      await refresh()
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card icon="star" title="Class worlds" tone="sun">
+      <p className="t-note">
+        Add a picture or a short video for today's lesson. It shows first, in its own row, on every kid's World step.
+      </p>
+      {!!list?.length && (
+        <ul className="t-creations" aria-label="Class worlds">
+          {list.map((w) => (
+            <li key={w.id} className="t-creation">
+              <WorldThumb w={w} />
+              <span className="t-creation-label">
+                <input
+                  className="t-world-name"
+                  defaultValue={w.name}
+                  maxLength={40}
+                  aria-label="World name (kids hear it when they pick it)"
+                  onBlur={(e) => {
+                    const name = e.target.value.trim()
+                    if (name && name !== w.name) void renameWorld(w.id, name).then(refresh)
+                    else e.target.value = w.name
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') e.currentTarget.blur()
+                  }}
+                />
+                <span className="t-hint">{w.media === 'video' ? 'Video' : 'Picture'}</span>
+              </span>
+              <Button
+                variant="secondary"
+                icon="trash"
+                disabled={busy}
+                aria-label={`Delete ${w.name}`}
+                onClick={() => void remove(w)}
+              >
+                Delete
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <Button variant="primary" icon="upload" disabled={busy} onClick={() => fileRef.current?.click()}>
+        {busy ? 'Adding…' : 'Add a picture or video'}
+      </Button>
+      <p className="t-hint t-hint-row">Videos up to 2 minutes and 100 MB. They play silently and loop.</p>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*,video/*"
+        hidden
+        data-testid="class-world-input"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          e.target.value = ''
+          void add(f)
+        }}
+      />
+    </Card>
+  )
+}
+
+/** Kids' saved uploads ("My worlds"). Removing them is grown-up only, so it lives here. */
+function KidWorldsCard() {
+  const { list, refresh } = useWorldList('mine')
+  const [busy, setBusy] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+
+  const run = async (ids: string[], ok: string) => {
+    setBusy(true)
+    try {
+      for (const id of ids) await deleteWorld(id)
+      toast(ok)
+    } catch {
+      toast('Could not delete it')
+    } finally {
+      await refresh()
+      setBusy(false)
+    }
+  }
+
+  const count = list?.length ?? null
+  return (
+    <Card icon="smile" title="Kids' worlds" tone="orange">
+      <p className="t-note">
+        {count === null
+          ? 'Counting…'
+          : count === 0
+            ? 'Pictures and videos kids add on the World step ("My worlds") show up here.'
+            : `${count === 1 ? '1 world' : `${count} worlds`} kids added (the newest ${MY_WORLDS_CAP} are kept).`}
+      </p>
+      {!!list?.length && (
+        <ul className="t-creations" aria-label="Kids' worlds">
+          {list.map((w) => (
+            <li key={w.id} className="t-creation">
+              <WorldThumb w={w} />
+              <span className="t-creation-label">
+                {w.name}
+                <span className="t-hint">{new Date(w.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+              </span>
+              <Button
+                variant="secondary"
+                icon="trash"
+                disabled={busy}
+                aria-label={`Delete ${w.name}`}
+                onClick={() => {
+                  playSound('pop')
+                  void run([w.id], 'World deleted')
+                }}
+              >
+                Delete
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!!count && (
+        <Button variant="danger" icon="trash" disabled={busy} onClick={() => setConfirm(true)}>
+          Delete all kids' worlds
+        </Button>
+      )}
+      <ConfirmDialog
+        open={confirm}
+        title="Delete kids' worlds?"
+        message="All pictures and videos kids added as worlds will be gone. Their saved creations stay."
+        confirmLabel="Delete all"
+        onConfirm={() => {
+          setConfirm(false)
+          playSound('pop')
+          void run((list ?? []).map((w) => w.id), "Kids' worlds deleted")
+        }}
+        onCancel={() => setConfirm(false)}
+      />
+    </Card>
+  )
+}
+
 const TIPS: { icon: IconName; title: string; text: string }[] = [
   { icon: 'sparkle', title: 'Light it evenly', text: 'Light the green screen and the child evenly. Dark patches and shadows are the #1 cause of holes and flicker.' },
   { icon: 'smile', title: 'No green clothes', text: 'Anything the same color as the screen disappears. (Fun lesson: a green scarf is an invisibility cloak!)' },
@@ -691,7 +901,11 @@ export default function Teacher() {
           <Toggle label="Sound effects" hint="Taps, pops and the countdown beep." checked={settings.sounds} onChange={(sounds) => update({ sounds })} />
         </Card>
 
+        <ClassWorldsCard />
+
         <CreationsCard />
+
+        <KidWorldsCard />
 
         <Card icon="star" title="Green screen tips" tone="sun">
           <ul className="tips">
@@ -722,6 +936,12 @@ export default function Teacher() {
               Google MediaPipe
             </a>{' '}
             (Apache License 2.0).
+          </p>
+          <p className="t-note t-credit">
+            The Real places videos are public domain or CC0 footage from Wikimedia Commons and NASA.{' '}
+            <a href={FOOTAGE_LICENSES_URL} target="_blank" rel="noreferrer noopener">
+              Video credits and licenses
+            </a>
           </p>
           <Licenses />
         </Card>

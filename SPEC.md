@@ -16,7 +16,7 @@ Research notes are in `docs/research/` (doink.md, talkline.md, critique.md, `rea
 
 | Step | What happens |
 |---|---|
-| 1 World | Picture grid of 12 built-in illustrated backgrounds, plus "My picture/video" upload. Images last the whole recording, which avoids DoInk's 5-second image trap. Videos loop. |
+| 1 World | Rows of big tiles, each with an icon header (rows scroll sideways on phones): **Class worlds** (only if a grown-up added any) → **Pictures** (12 built-in illustrated worlds) → **Moving worlds** (6 canvas-animated worlds, "Moving" badge) → **Real places** (4 looping footage clips) → **My worlds** ("Add mine" upload tile + the child's saved uploads, newest first). Images last the whole recording, which avoids DoInk's 5-second image trap. Videos loop. Picking a world speaks its name when voice is on. |
 | 2 Me | The camera starts and the live key is applied automatically. The key color is sampled from the frame border. Big flip-camera button. A "Magic finger: tap the green" option re-picks the key color. Drag to move me, pinch or +/- to resize. |
 | 3 Stickers | Picture-only sticker tray. Tap to add. Drag to move, pinch or corner handle to resize and rotate, corner ✕ to delete. |
 | 4 Snap/Film | A Photo / Video toggle, shown as two big picture cards. Then a 160px hero button, a spoken 3-2-1 countdown, a giant stop button, and the hard limit from settings. |
@@ -31,6 +31,8 @@ Research notes are in `docs/research/` (doink.md, talkline.md, critique.md, `rea
 - voice and sounds toggles, mirror
 - Magic Helper: Auto / On / Off (teacher-only; kids never see it)
 - delete creations
+- **Class worlds:** add pictures/videos (image/*, video/*), rename them (kids hear the name), delete them. They show first on every child's World step.
+- **Kids' worlds:** the children's saved "My worlds" uploads, with delete and delete all (kids can't delete them on the World step).
 - "How to set up your green screen" tips, based on the DoInk reference sheets: even lighting, no green clothes, keep the subject away from the screen
 
 ## Visual rules
@@ -122,12 +124,17 @@ Target pipeline (see `docs/research/realtime/recommendation.md` for constants an
 - `saveToDevice(blob, filename): Promise<'shared'|'downloaded'|'cancelled'>`: tries `navigator.canShare({files})`, then falls back to an `<a download>`.
 
 ### `web/src/lib/storage.ts` (idb)
-DB `magicscreen` v1, with stores `creations` (keyPath id) and `media` (key id → Blob). Exports:
+DB `magicscreen` **v2**, with stores `creations` (keyPath id), `media` (key id → Blob), `uploads` (key id → saved world Blob) and, new in v2, `worlds` (keyPath id, index `scope`: `SavedWorld` metadata). The v1 → v2 upgrade keeps all data and turns any blob already in `uploads` into a kid "My world". Exports:
 - `saveCreation(c: Creation, blob: Blob)`
 - `listCreations(): Promise<Creation[]>` (newest first)
 - `getCreationBlob(id)`
 - `deleteCreation(id)`
-- `saveUpload(blob): Promise<string>` / `getUpload(id)` (user backgrounds)
+- `saveWorld(blob, { scope: 'mine'|'class', name, thumbDataUrl? }): Promise<SavedWorld>` (metadata + blob in one transaction; `mine` is capped at `MY_WORLDS_CAP` = 12, the oldest goes), `listWorlds(scope)` (newest first), `renameWorld(id, name)`, `deleteWorld(id)`, `getUpload(id)` (the blob), `saveUpload(blob)` (= a kid world)
+
+### `web/src/lib/worlds.ts` / `assets/footage.ts` / `assets/animatedWorlds.ts`
+- `worlds.ts`: `judgeWorldFile` (videos ≤ 100 MB and ≤ 2 min, pictures ≤ 30 MB; friendly "Grown-ups: …" messages), `prepareWorldFile` (check + 320 px 16:9 JPEG thumbnail), `niceWorldName` (class world name from the file name), `savedWorldChoice` (id `saved:<id>`, kind image/video, fresh blob: URL).
+- `footage.ts`: `FOOTAGE_WORLDS` (`/worlds/<id>.mp4` + `.jpg` poster), `footageChoice` (id `footage:<id>`, kind `video`), `warmFootage` (one full fetch so the service worker stores a 200 for offline). PWA: `/worlds/**` is excluded from precache. Workbox runtime rule `CacheFirst` for `/worlds/*.(mp4|jpg)`, cache `worlds-footage`, `rangeRequests: true` (RangeRequestsPlugin), `cacheableResponse` [0, 200]. Checked in WebKit against `vite preview`: it plays online, gets cached and plays offline through range requests.
+- `animatedWorlds.ts`: `ANIMATED_WORLDS` (`{ id, name, thumbColor, posterSvg, create(w, h) }` → instance `{ canvas, ready, start, stop, frame(nowMs), seek, destroy }`). `BackgroundChoice` kind `'animated'` + `animatedId`. `loadBackgroundSource` returns `{ source: canvas, dispose, tick, pause }`. The Stage calls `tick(now)` right before `compositor.render()` and `pause(true/false)` on visibilitychange (video worlds pause too). Sea Friends reuses Under the Sea's coral front layer. The Compositor re-uploads canvas/video backgrounds every frame, and the light-wrap background blur is rebuilt every 4th fresh frame (`BG_BLUR_EVERY`).
 
 ### `web/src/lib/sound.ts` / `voice.ts`
 - `sound.ts` exports `playSound('tap'|'pop'|'success'|'countdown'|'shutter'|'start'|'stop'|'magic')`. Sounds are synthesized with WebAudio, so there are no asset files. It respects `settings.sounds`, and `unlock()` must be called on the first gesture.
@@ -145,10 +152,11 @@ DB `magicscreen` v1, with stores `creations` (keyPath id) and `media` (key id �
 - **Screens:** `screens/Home.tsx`, `screens/Make.tsx` (the stepper and steps), `screens/steps/{World,Me,Stickers,Action,Keep}Step.tsx`, `screens/Teacher.tsx`, `screens/View.tsx`.
 
 ## Privacy
-Everything runs in the browser. There is no server, no account and no analytics. Creations and uploaded backgrounds live only in the device's IndexedDB; "Save" hands a file to the system share sheet or a download. Home footer: "Everything you make stays on this device."
+Everything runs in the browser. There is no server, no account and no analytics. Creations, kids' saved worlds and class worlds live only in the device's IndexedDB; "Save" hands a file to the system share sheet or a download. Home footer: "Everything you make stays on this device."
 
 ## Licensing and credits
 - CorridorKey has been removed, so the Corridor Key Licence constraints (credit line, share-alike, no bundled weights) no longer apply.
 - **MediaPipe** (`@mediapipe/tasks-vision` and the selfie segmenter model) is Apache-2.0. Keep its license and attribution: Teacher → About shows "The Magic Helper person cutout uses Google MediaPipe (Apache License 2.0)", and the Apache-2.0 license text/NOTICE must ship with the app (e.g. alongside `public/mediapipe/`).
+- **Real places footage** (`web/public/worlds/`): public domain (NASA ISS footage; Wikimedia Commons PD-self) and CC0 (Wikimedia Commons). Sources, authors and licenses are in `web/public/worlds/LICENSES.md`, linked from Teacher → About ("Video credits and licenses").
 - RVM (GPL-3.0) and other non-permissive models must not be added.
 - Project license: CC BY-NC-SA 4.0 is the current field value, left as-is; the license is to be chosen by the owner.

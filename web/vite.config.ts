@@ -12,12 +12,30 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,woff2,wasm,tflite}'],
         // Precache only the SIMD MediaPipe runtime (every current browser); the
         // nosimd/module variants (~13 MB each, iOS < 16.4) are cached on first use.
-        globIgnores: ['**/mediapipe/wasm/vision_wasm_nosimd_internal.*', '**/mediapipe/wasm/vision_wasm_module_internal.*'],
+        // Real-place clips (public/worlds, ~9 MB) are never precached: each is cached on first play.
+        globIgnores: [
+          '**/mediapipe/wasm/vision_wasm_nosimd_internal.*',
+          '**/mediapipe/wasm/vision_wasm_module_internal.*',
+          '**/worlds/**',
+        ],
         runtimeCaching: [
           {
             urlPattern: /\/mediapipe\/wasm\/vision_wasm_(nosimd|module)_internal\.(js|wasm)$/,
             handler: 'CacheFirst',
             options: { cacheName: 'mediapipe-fallback', expiration: { maxEntries: 4 } },
+          },
+          {
+            // Real places footage + posters. Safari asks for video in byte ranges: a 206 is
+            // never stored (only full 0/200 responses), and once the whole clip is cached
+            // (WorldStep's warmFootage fetch) the RangeRequestsPlugin answers ranges offline.
+            urlPattern: /\/worlds\/[^/]+\.(?:mp4|jpg)$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'worlds-footage',
+              rangeRequests: true,
+              cacheableResponse: { statuses: [0, 200] },
+              expiration: { maxEntries: 12, purgeOnQuotaError: true },
+            },
           },
         ],
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,

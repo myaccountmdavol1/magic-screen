@@ -151,6 +151,8 @@ const RECAL_MS = 2000
 const RECAL_EMA = 0.2
 const RECAL_REBAKE_DE = 2
 const FRAME_RING = 90
+/** Moving backgrounds: rebuild the light-wrap blur every Nth fresh background frame. */
+const BG_BLUR_EVERY = 4
 /** A hole whose keyD sits this far above the screen's is clothing, not an arm gap. */
 const SHIRT_KEYD_GAP = 0.8
 
@@ -710,6 +712,10 @@ export class Compositor {
   private gfHistValid = false
   private bgBlurDirty = true
   private bgBlurValid = false
+  /** The last blur rebuild actually drew the background (not just the clear colour). */
+  private bgBlurHadBg = false
+  /** Fresh background uploads since the last blur rebuild (moving worlds throttle). */
+  private bgFreshSinceBlur = 0
   private lastSampleAt = 0
   private shirtHits = 0
   private lastSample: KeyerStats['lastSample'] = null
@@ -1975,6 +1981,8 @@ export class Compositor {
     this.boxBlur(st, t[0], t[1])
     this.bgBlurValid = true
     this.bgBlurDirty = false
+    this.bgBlurHadBg = bgOk && !!this.bg
+    this.bgFreshSinceBlur = 0
   }
 
   /**
@@ -2052,7 +2060,10 @@ export class Compositor {
     if (this.bg) {
       const up = this.upload(gl, st.bgTex, this.bg)
       bgOk = up.ok
-      if (up.fresh) this.bgBlurDirty = true
+      // Moving worlds (canvas/video) upload a fresh frame nearly every frame. The light
+      // wrap only tints the child's edges with a 1/8-size blur, so refresh it every
+      // BG_BLUR_EVERY fresh frames instead of every frame (still images: first upload only).
+      if (up.fresh && (!this.bgBlurHadBg || ++this.bgFreshSinceBlur >= BG_BLUR_EVERY)) this.bgBlurDirty = true
     }
     if (this.bgBlurDirty) this.rebuildBgBlur(st, bgOk)
 

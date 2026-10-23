@@ -19,7 +19,7 @@ export interface KeySettings {
   spill: number // 0..1, green spill suppression strength (default 0.6)
 }
 
-export type BackgroundKind = 'builtin' | 'image' | 'video' | 'color'
+export type BackgroundKind = 'builtin' | 'image' | 'video' | 'color' | 'animated'
 
 export interface BackgroundChoice {
   id: string
@@ -29,6 +29,26 @@ export interface BackgroundChoice {
   src: string
   /** builtin only: key into BUILTIN_BACKGROUNDS */
   builtinId?: string
+  /** animated only: key into ANIMATED_WORLDS (src is then the poster data URL) */
+  animatedId?: string
+  /** video worlds: still frame for tiles and before the first frame plays */
+  poster?: string
+}
+
+/** Where a saved world came from: a kid's "My picture" upload, or a grown-up's class world. */
+export type SavedWorldScope = 'mine' | 'class'
+
+/** A picture/video world saved on this device (IndexedDB). The media blob is stored separately under the same id. */
+export interface SavedWorld {
+  id: string
+  scope: SavedWorldScope
+  media: 'image' | 'video'
+  mime: string
+  createdAt: number // epoch ms
+  /** spoken + aria name, e.g. "My picture" or a teacher-chosen "Volcano trip" */
+  name: string
+  /** small JPEG data URL for the World step tile ('' when it could not be made) */
+  thumbDataUrl: string
 }
 
 /** A placed sticker on the stage. Coordinates are normalized to the stage (0..1), center-anchored. */

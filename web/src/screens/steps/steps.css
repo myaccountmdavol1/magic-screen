@@ -154,13 +154,17 @@
 }
 
 .world-name {
+  align-self: center;
   margin-top: 0.45rem;
+  padding: 0.12rem 0.65rem 0.18rem;
+  border-radius: var(--radius-pill);
+  /* A deep-blue pill keeps white names readable on pale tiles (Castle, Snow Day...). */
+  background: rgba(27, 79, 156, 0.62);
   font-family: var(--font-display);
   font-size: clamp(1rem, 2.4vw, 1.2rem);
   font-weight: 800;
   line-height: 1.1;
   text-align: center;
-  text-shadow: 0 2px 0 rgba(27, 79, 156, 0.35);
 }
 
 .world-check {
@@ -193,6 +197,7 @@
 }
 
 .world-upload .world-name {
+  background: none;
   text-shadow: none;
 }
 
@@ -205,6 +210,115 @@
 .world-upload-icon {
   display: grid;
   place-items: center;
+}
+
+/* World rows: Class worlds → Pictures → Moving worlds → Real places → My worlds. */
+.world-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  /* the last row must clear the nav band (sticky on tablets, fixed bar on phones) */
+  padding-bottom: 1.5rem;
+}
+
+.world-row {
+  min-width: 0;
+}
+
+.world-row-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.6rem 0.15rem;
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--grape-700);
+}
+
+.world-row-icon {
+  display: grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  color: #fff;
+}
+
+.world-row-icon.tone-blue { background: var(--grape-500); box-shadow: 0 3px 0 var(--grape-600); }
+.world-row-icon.tone-sun { background: var(--sun-500); box-shadow: 0 3px 0 var(--sun-edge); }
+.world-row-icon.tone-pink { background: var(--bubble-500); box-shadow: 0 3px 0 var(--bubble-edge); }
+.world-row-icon.tone-mint { background: var(--mint-500); box-shadow: 0 3px 0 var(--mint-edge); }
+.world-row-icon.tone-orange { background: var(--tang-500); box-shadow: 0 3px 0 var(--tang-600); }
+
+/* "Moving" / video badge, top-left on the picture (the check sits top-right). */
+.world-badge {
+  position: absolute;
+  top: 0.85rem;
+  left: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.55rem 0.2rem 0.4rem;
+  border: 2px solid #fff;
+  border-radius: var(--radius-pill);
+  background: var(--bubble-500);
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 2px 0 var(--bubble-edge);
+  pointer-events: none;
+}
+
+.world-badge-video {
+  padding: 0.3rem;
+  background: var(--grape-700);
+  box-shadow: none;
+}
+
+.world-spinner {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 5px solid rgba(251, 146, 60, 0.3);
+  border-top-color: var(--tang-500);
+  border-radius: 50%;
+  animation: world-spin 0.9s linear infinite;
+}
+
+@keyframes world-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Phones: each row scrolls sideways (a peek of the next tile says "there's more"),
+   so every kind of world is visible without a long hunt down the page. */
+@media (max-width: 639px) {
+  .world-rows .world-grid {
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    grid-auto-columns: 42%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scroll-padding-inline: 0.15rem;
+    /* room for the selected outline, check badge and tile shadow inside the scroller */
+    /* bleed to the screen edge exactly by the phone shell gutter (no page side-scroll) */
+    margin: -0.9rem calc(-1 * max(0.6rem, env(safe-area-inset-right))) 0 calc(-1 * max(0.6rem, env(safe-area-inset-left)));
+    padding: 0.9rem max(0.6rem, env(safe-area-inset-right)) 0.6rem max(0.6rem, env(safe-area-inset-left));
+    scrollbar-width: none;
+  }
+  .world-rows .world-grid::-webkit-scrollbar {
+    display: none;
+  }
+  .world-rows .world-tile {
+    scroll-snap-align: start;
+  }
+  .world-row-title {
+    font-size: 1.25rem;
+  }
 }
 
 /* ---------- Shared stage overlays ---------- */

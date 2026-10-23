@@ -7,7 +7,12 @@ It's free: no accounts, no paywall, no server.
 ## Features
 
 - **Five big steps:** World → Me → Stickers → Snap → Keep, with a picture stepper and spoken prompts for children who can't read yet.
-- **12 built-in worlds**, or upload your own picture or video as a background.
+- **Worlds, in rows on the World step:**
+  - **Class worlds** (only when a grown-up has added some): pictures or videos added in Teacher settings → Class worlds. They show first, so the lesson's world is the first thing kids see.
+  - **Pictures:** 12 built-in illustrated worlds.
+  - **Moving worlds:** 6 cartoon worlds animated live on a canvas (Sea Friends, Rocket Trip, Snow Day, Rainy Day, Volcano, Balloon Ride). There are no video files, and recordings include the motion.
+  - **Real places:** 4 looping public-domain/CC0 video clips (Ocean Waves, Planet Earth, Waterfall, Swimming Fish) in `web/public/worlds/`. They aren't precached. The service worker caches each clip after its first play, so it works offline from then on.
+  - **My worlds:** a child's own picture or video, saved on the device (the newest 12 are kept). Videos over 100 MB or 2 minutes are turned away with a grown-up hint. Only a grown-up can remove them, in Teacher settings → Kids' worlds.
 - **Live keying** at camera frame rate. "Auto fix" picks the screen colour, and "Tap the green" (the Magic finger) lets you point at the screen to choose it.
 - **Move and resize yourself:** drag to move, Bigger / Smaller buttons, and Center me.
 - **34 stickers** in four packs (Fun, Faces, Animals, Weather). Drag, resize, rotate and delete them.
@@ -77,6 +82,7 @@ Then on the iPad:
 - Inspired by [DoInk Green Screen](https://www.doink.com/). This project is not affiliated with or endorsed by DoInk.
 - Visual design follows Talkline.
 - Uses [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) (Apache License 2.0) for the Magic Helper and AI cutout. Its license ships with the app (`web/THIRD_PARTY_LICENSES.md`, `public/mediapipe/LICENSE.md`) and is shown under Teacher → About → Open-source licenses.
+- Real places footage: public domain (NASA, Wikimedia Commons) and CC0 (Wikimedia Commons). Sources, authors and licenses are in `web/public/worlds/LICENSES.md`, linked from Teacher → About.
 - Fonts: Baloo 2 and Quicksand (SIL Open Font License), self-hosted through Fontsource.
 
 The project license has not been chosen by the owner yet.

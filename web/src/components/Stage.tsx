@@ -245,6 +245,10 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
   }, [me])
 
   // --- background -----------------------------------------------------------
+  // Moving worlds draw their next frame from the render loop (bgTickRef) and freeze
+  // while the app is hidden (bgPauseRef); video worlds pause too.
+  const bgTickRef = useRef<((now: number) => void) | null>(null)
+  const bgPauseRef = useRef<((paused: boolean) => void) | null>(null)
   useEffect(() => {
     let cancelled = false
     let dispose = () => {}
@@ -252,6 +256,9 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
       .then((res) => {
         if (cancelled) return res.dispose()
         dispose = res.dispose
+        bgTickRef.current = res.tick ?? null
+        bgPauseRef.current = res.pause ?? null
+        if (document.hidden) res.pause?.(true)
         compositorRef.current?.setBackground(res.source)
       })
       .catch(() => {
@@ -259,9 +266,17 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
       })
     return () => {
       cancelled = true
+      bgTickRef.current = null
+      bgPauseRef.current = null
       dispose()
     }
   }, [background])
+
+  useEffect(() => {
+    const onVis = () => bgPauseRef.current?.(document.hidden)
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
 
   // --- world front layer (C5: desk / fence drawn over the child, under stickers) ---
   useEffect(() => {
@@ -309,6 +324,7 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
       const comp = compositorRef.current
       if (!comp) return
       beforeRender(now)
+      bgTickRef.current?.(now)
       // Always render, even when idle: Safari's captureStream only emits on redraw.
       comp.render()
     }

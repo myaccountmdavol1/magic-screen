@@ -440,6 +440,29 @@ img.view-stage {
   gap: 0.4rem;
 }
 
+.t-world-thumb-empty {
+  display: grid;
+  place-items: center;
+  color: var(--grape-500);
+}
+
+.t-world-name {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.6rem;
+  border: 2px solid var(--grape-100);
+  border-radius: 0.75rem;
+  background: #fff;
+  color: var(--grape-700);
+  font: inherit;
+  font-weight: 700;
+}
+
+.t-world-name:focus-visible {
+  outline: 3px solid var(--grape-400);
+  outline-offset: 1px;
+}
+
 .t-creation-deleted .t-creation-thumb {
   opacity: 0.6;
 }

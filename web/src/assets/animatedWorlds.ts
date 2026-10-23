@@ -223,7 +223,7 @@ const SEA_WEEDS: [number, number, string, string, number][] = [
 
 const seaWorld: WorldSpec = {
   id: 'sea-moving',
-  name: 'Under the Sea (moving)',
+  name: 'Sea Friends',
   thumbColor: '#0ea5e9',
   posterT: 7,
   defs: vgrad('aw-se-g', [0, '#7dd3fc'], [0.45, '#0ea5e9'], [1, '#0369a1']),
@@ -310,7 +310,7 @@ const ROCKET_BODY =
 
 const spaceWorld: WorldSpec = {
   id: 'space-moving',
-  name: 'Outer Space (moving)',
+  name: 'Rocket Trip',
   thumbColor: '#3b2a8f',
   posterT: 6.5,
   defs: vgrad('aw-sp-g', [0, '#1e1b4b'], [0.55, '#3b2a8f'], [1, '#7c3aed']),
@@ -507,7 +507,7 @@ function drawRain(p: Painter, t: number, a: Float32Array, cx: number, cy: number
 
 const weatherWorld: WorldSpec = {
   id: 'weather-moving',
-  name: 'Rainy Weather Map',
+  name: 'Rainy Day',
   thumbColor: '#2563eb',
   posterT: 3,
   defs:
@@ -683,7 +683,7 @@ const RB_HEARTS: [number, number, number, number][] = [
 
 const rainbowWorld: WorldSpec = {
   id: 'rainbow-moving',
-  name: 'Rainbow Sky',
+  name: 'Balloon Ride',
   thumbColor: '#fbcfe8',
   posterT: 5,
   defs: vgrad('aw-ra-g', [0, '#bae6fd'], [0.5, '#fbcfe8'], [1, '#fef9c3']),

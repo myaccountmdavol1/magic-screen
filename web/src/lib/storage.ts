@@ -1,17 +1,22 @@
 // On-device gallery (IndexedDB via idb). Nothing here ever leaves the device.
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import type { Creation } from '../types'
+import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb'
+import type { Creation, SavedWorld, SavedWorldScope } from '../types'
 
 interface MagicDB extends DBSchema {
   creations: { key: string; value: Creation; indexes: { createdAt: number } }
   /** finished creation media, keyed by Creation.id */
   media: { key: string; value: Blob }
-  /** user-uploaded backgrounds (My picture/video) */
+  /** saved world media (kid "My worlds" + teacher "Class worlds"), keyed by SavedWorld.id */
   uploads: { key: string; value: Blob }
+  /** v2: saved world metadata; the blob lives in 'uploads' under the same id */
+  worlds: { key: string; value: SavedWorld; indexes: { scope: SavedWorldScope } }
 }
 
 const DB_NAME = 'magicscreen'
-const DB_VERSION = 1
+/** v1: creations, media, uploads. v2: + worlds (metadata for saved uploads / class worlds). */
+export const DB_VERSION = 2
+/** How many kid uploads ("My worlds") are kept; the oldest goes when a new one is saved. */
+export const MY_WORLDS_CAP = 12
 
 let dbPromise: Promise<IDBPDatabase<MagicDB>> | null = null
 
@@ -21,13 +26,20 @@ function db(): Promise<IDBPDatabase<MagicDB>> {
       return Promise.reject(new Error('This browser cannot save pictures. Try Safari or Chrome.'))
     }
     dbPromise = openDB<MagicDB>(DB_NAME, DB_VERSION, {
-      upgrade(d) {
+      upgrade(d, oldVersion, _newVersion, tx) {
         if (!d.objectStoreNames.contains('creations')) {
           const s = d.createObjectStore('creations', { keyPath: 'id' })
           s.createIndex('createdAt', 'createdAt')
         }
         if (!d.objectStoreNames.contains('media')) d.createObjectStore('media')
         if (!d.objectStoreNames.contains('uploads')) d.createObjectStore('uploads')
+        if (!d.objectStoreNames.contains('worlds')) {
+          const w = d.createObjectStore('worlds', { keyPath: 'id' })
+          w.createIndex('scope', 'scope')
+        }
+        // v1 → v2: any blob already in 'uploads' had no metadata. Keep it as a kid
+        // "My world" so nothing a child added is lost (creations/media are untouched).
+        if (oldVersion >= 1 && oldVersion < 2) void migrateV1Uploads(tx)
       },
       // Another tab upgraded the DB: drop our handle so the next call reopens.
       blocking() {
@@ -223,21 +235,140 @@ export function deleteAllCreations(): Promise<void> {
   })
 }
 
-/** Save a user background; returns its id. */
-export function saveUpload(blob: Blob): Promise<string> {
+type UpgradeTx = IDBPTransaction<MagicDB, StoreNames<MagicDB>[], 'versionchange'>
+
+async function migrateV1Uploads(tx: UpgradeTx): Promise<void> {
+  const uploads = tx.objectStore('uploads')
+  const worlds = tx.objectStore('worlds')
+  let cursor = await uploads.openCursor()
+  let n = 0
+  while (cursor) {
+    const type = (cursor.value as Blob | undefined)?.type ?? ''
+    const id = String(cursor.key)
+    const media = type.startsWith('video/') ? 'video' : 'image'
+    await worlds.put({
+      id,
+      scope: 'mine',
+      media,
+      mime: type,
+      // Older first: keep their stored order, all before anything saved from now on.
+      createdAt: n++,
+      name: media === 'video' ? 'My video' : 'My picture',
+      thumbDataUrl: '',
+    })
+    cursor = await cursor.continue()
+  }
+}
+
+/** Newest first, capped: which saved worlds to keep and which to drop. Pure, unit tested. */
+export function capWorlds(list: SavedWorld[], cap: number): { keep: SavedWorld[]; drop: SavedWorld[] } {
+  const sorted = [...list].sort((a, b) => b.createdAt - a.createdAt)
+  return { keep: sorted.slice(0, cap), drop: sorted.slice(cap) }
+}
+
+export interface SaveWorldInput {
+  scope: SavedWorldScope
+  name: string
+  thumbDataUrl?: string
+  /** defaults to now (tests pass a clock) */
+  createdAt?: number
+}
+
+/**
+ * Save a picture/video world on this device (metadata + blob in one transaction).
+ * Kid uploads are capped at MY_WORLDS_CAP: the oldest one is removed to make room.
+ */
+export function saveWorld(blob: Blob, input: SaveWorldInput): Promise<SavedWorld> {
+  pendingSaves++
   return guard(async () => {
-    const id = newId('up')
-    await (await db()).put('uploads', blob, id)
-    return id
+    const d = await db()
+    const world: SavedWorld = {
+      id: newId(input.scope === 'class' ? 'cw' : 'up'),
+      scope: input.scope,
+      media: blob.type.startsWith('video/') ? 'video' : 'image',
+      mime: blob.type,
+      createdAt: input.createdAt ?? Date.now(),
+      name: input.name,
+      thumbDataUrl: input.thumbDataUrl ?? '',
+    }
+    const tx = d.transaction(['worlds', 'uploads'], 'readwrite')
+    const reqs: Promise<unknown>[] = []
+    try {
+      reqs.push(tx.objectStore('uploads').put(blob, world.id))
+      reqs.push(tx.objectStore('worlds').put(world))
+      if (input.scope === 'mine') {
+        const mine = await tx.objectStore('worlds').index('scope').getAll('mine')
+        const { drop } = capWorlds(mine, MY_WORLDS_CAP)
+        for (const w of drop) {
+          reqs.push(tx.objectStore('worlds').delete(w.id), tx.objectStore('uploads').delete(w.id))
+        }
+      }
+      await Promise.all([...reqs, tx.done])
+    } catch (err) {
+      for (const p of reqs) p.catch(() => {})
+      tx.done.catch(() => {})
+      try {
+        tx.abort()
+      } catch {
+        /* already finished */
+      }
+      throw err
+    }
+    return world
+  }).finally(() => {
+    pendingSaves--
   })
 }
 
+/** Saved worlds of one kind, newest first. */
+export function listWorlds(scope: SavedWorldScope): Promise<SavedWorld[]> {
+  return guard(async () => {
+    const all = await (await db()).getAllFromIndex('worlds', 'scope', scope)
+    return all.sort((a, b) => b.createdAt - a.createdAt)
+  })
+}
+
+/** Rename a saved world (Teacher → Class worlds). */
+export function renameWorld(id: string, name: string): Promise<void> {
+  return guard(async () => {
+    const d = await db()
+    const tx = d.transaction('worlds', 'readwrite')
+    const w = await tx.store.get(id)
+    if (w) await tx.store.put({ ...w, name })
+    await tx.done
+  })
+}
+
+/** Remove a saved world and its media (Teacher only). */
+export function deleteWorld(id: string): Promise<void> {
+  return guard(async () => {
+    const d = await db()
+    const tx = d.transaction(['worlds', 'uploads'], 'readwrite')
+    await Promise.all([tx.objectStore('worlds').delete(id), tx.objectStore('uploads').delete(id), tx.done])
+  })
+}
+
+/** Save a kid background ("My worlds"); returns its id. */
+export async function saveUpload(blob: Blob): Promise<string> {
+  const media = blob.type.startsWith('video/') ? 'video' : 'image'
+  return (await saveWorld(blob, { scope: 'mine', name: media === 'video' ? 'My video' : 'My picture' })).id
+}
+
+/** The media of a saved world. */
 export function getUpload(id: string): Promise<Blob | undefined> {
   return guard(async () => (await db()).get('uploads', id))
 }
 
 export function deleteUpload(id: string): Promise<void> {
-  return guard(async () => (await db()).delete('uploads', id))
+  return deleteWorld(id)
+}
+
+/** Tests only: forget the cached connection so the next call reopens the database. */
+export async function _closeForTests(): Promise<void> {
+  const p = dbPromise
+  dbPromise = null
+  purgedThisLoad = false
+  if (p) (await p.catch(() => null))?.close()
 }
 
 /** Convenience for callers building a Creation. */
