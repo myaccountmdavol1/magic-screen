@@ -5,6 +5,8 @@ import { createContext, useContext, useEffect, useRef, useState, type RefObject 
 import type { Compositor, KeyerSignal } from './keyer/Compositor'
 import type { CameraErrorKind } from './camera'
 import type { Segmenter } from './segmenter'
+import { HelperTrustTracker } from './helperTrust'
+import { KEYER_TUNING } from './keyer/shaders'
 import {
   cadenceFromBenchmark,
   detectPhone,
@@ -20,7 +22,7 @@ import {
   type HelperSetting,
 } from './deviceTier'
 import type { BackgroundChoice, PlacedSticker, RGB, Settings } from '../types'
-import { getBackgroundImage, getStickerImage, loadImage } from '../assets/svg'
+import { getBackgroundImage, getFrontImage, getFrontUrl, getStickerImage, loadImage } from '../assets/svg'
 
 export interface StageApi {
   /** The live compositor (null until the canvas is mounted and WebGL is ready). */
@@ -44,6 +46,12 @@ export interface StageApi {
   retryCamera: () => void
   /** The Magic Helper (on-device person finder) is currently helping the key. */
   helperActive: boolean
+  /**
+   * false while greenScreenMode 'auto' is still taking its first look at the camera
+   * (the stage shows "Finding you…"); always true for explicit modes. Hide
+   * green-screen-only tools until it is true.
+   */
+  modeDecided: boolean
 }
 
 /** Detached element that hosts the single Stage; StageSlot moves it into place. */
@@ -67,6 +75,7 @@ export const EMPTY_STAGE_API: StageApi = {
   armMagicFinger: noop,
   retryCamera: noop,
   helperActive: false,
+  modeDecided: false,
 }
 
 export const StageContext = createContext<StageContextValue>({ ...EMPTY_STAGE_API, host: null })
@@ -101,6 +110,13 @@ export type BackgroundSource = HTMLImageElement | HTMLVideoElement | string | nu
  * Used by the live Stage.
  * Uploaded videos loop silently so a long recording never runs out of world.
  */
+/** C5: the chosen world's front layer (desk, fence...), or null when it has none. */
+export async function loadFrontOverlay(bg: BackgroundChoice | null): Promise<HTMLImageElement | null> {
+  const id = bg?.kind === 'builtin' ? (bg.builtinId ?? bg.id) : null
+  if (!id || !getFrontUrl(id)) return null
+  return getFrontImage(id)
+}
+
 export async function loadBackgroundSource(
   bg: BackgroundChoice | null,
 ): Promise<{ source: BackgroundSource; dispose: () => void }> {
@@ -183,8 +199,9 @@ const BACKOFF_TICK_MS = 250
 
 const SIGNAL_TEXT = {
   uneven: 'Grown-ups: the green screen looks patchy. More even light or a smoother screen will make the magic cleaner.',
-  shirtOn: 'That shirt is the same color as the green screen! The Magic Helper will keep you in the picture.',
-  shirtOff: 'That shirt is the same color as the green screen. A different color shirt works best!',
+  dark: 'Grown-ups: the green screen is in the dark. Shine more light on it and the magic gets cleaner!',
+  shirtOn: 'Green shirt? Magic helper is on!',
+  shirtOff: 'Grown-ups: that shirt matches the green screen. A different color shirt works best.',
 } as const
 
 function isPhoneDevice(): boolean {
@@ -229,7 +246,7 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
   const lastBackoffRef = useRef(0)
   const notifyRef = useRef(notify)
   notifyRef.current = notify
-  const shownRef = useRef({ uneven: false, shirt: false })
+  const shownRef = useRef({ uneven: false, shirt: false, dark: false })
   const videoRef = useRef(video)
   videoRef.current = video
 
@@ -258,14 +275,26 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
         .then(async (seg) => {
           if (cancelled) return seg.close()
           segRef.current = seg
-          const v = videoRef.current
+          let v = videoRef.current
           if (benchRef.current === null && v) {
             benchingRef.current = true
             // Segment mode keeps showing a live cutout while the device is measured.
             const onMask = (m: { data: Uint8Array; w: number; h: number }) => {
               if (segmentModeRef.current) compositorRef.current?.setMaskData(m.data, m.w, m.h)
             }
-            const ms = await seg.benchmark(v, { onMask })
+            let ms = await seg.benchmark(v, { onMask })
+            // The camera was flipped (or woken) mid-benchmark: the old video stopped giving
+            // frames, so the result (often Infinity) would turn the helper off for the whole
+            // session. Measure again on the new camera.
+            for (let tries = 0; tries < 3 && !cancelled && videoRef.current !== v; tries++) {
+              // Between cameras there is briefly no video: give the new one a moment.
+              for (let wait = 0; wait < 50 && !cancelled && !videoRef.current; wait++) {
+                await new Promise((r) => window.setTimeout(r, 100))
+              }
+              if (cancelled || !videoRef.current) break
+              v = videoRef.current
+              ms = await seg.benchmark(v, { onMask })
+            }
             benchingRef.current = false
             if (cancelled) return
             setBench(cadenceFromBenchmark(ms, seg.delegate))
@@ -316,6 +345,9 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
       if (s.type === 'uneven' && !shownRef.current.uneven) {
         shownRef.current.uneven = true
         notifyRef.current(SIGNAL_TEXT.uneven)
+      } else if (s.type === 'dark' && !shownRef.current.dark) {
+        shownRef.current.dark = true
+        notifyRef.current(SIGNAL_TEXT.dark)
       } else if (s.type === 'shirt' && !shownRef.current.shirt) {
         shownRef.current.shirt = true
         notifyRef.current(helper === 'off' ? SIGNAL_TEXT.shirtOff : SIGNAL_TEXT.shirtOn)
@@ -327,9 +359,18 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
     }
   }, [comp, helper])
 
+  // Magic Helper trust (mask age in camera frames + motion + confidence), helperTrust.ts.
+  const trustRef = useRef(new HelperTrustTracker())
+
   // Camera switch: start the frame counter over; history reset happens in setForeground.
   useEffect(() => {
     frameRef.current = 0
+    const trust = trustRef.current
+    trust.reset()
+    const stream = video?.srcObject
+    const track = stream instanceof MediaStream ? stream.getVideoTracks()[0] : undefined
+    const fps = track?.getSettings?.().frameRate
+    trust.setFrameMs(fps && fps > 0 ? 1000 / fps : 1000 / 30)
   }, [video])
 
   // Coming back to the tab: the old matte history no longer matches the picture.
@@ -371,6 +412,10 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
       c.setMlWeight(0)
       return
     }
+    // Camera media time (ms) of the frame about to be drawn: mask age is counted in
+    // camera frames, not display frames.
+    const camT = v.currentTime * 1000
+    const trust = trustRef.current
     if (shouldRunThisFrame(st.cadence, idx) && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       const t0 = performance.now()
       const m = seg.segment(v, now)
@@ -379,8 +424,11 @@ export function useKeyerRuntime(opts: KeyerRuntimeOptions): KeyerRuntime {
       if (m) {
         c.setMaskData(m.data, m.w, m.h)
         c.setMlWeight(1)
+        trust.onMask(m.data, m.w, m.h, camT)
+        c.setMlDilate(trust.dilate(KEYER_TUNING.dilate))
       }
     }
+    c.setMlTrust(trust.trust(camT))
   })
   return { status, active: status === 'on' && running, beforeRender: beforeRender.current }
 }

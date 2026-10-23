@@ -337,8 +337,8 @@
   position: relative;
   /* View uses the wide shell; cap the picture by screen height too so Save/Delete
      and Back stay on screen on landscape iPads and laptops. */
-  width: min(100%, calc((100vh - 22rem) * 16 / 9));
-  width: min(100%, calc((100dvh - 22rem) * 16 / 9));
+  width: min(100%, calc((100vh - 25rem) * 16 / 9));
+  width: min(100%, calc((100dvh - 25rem) * 16 / 9));
   min-width: min(100%, 18rem);
   margin-inline: auto;
 }
@@ -383,6 +383,72 @@ img.view-stage {
 
 @media (max-width: 639px) {
   .view-actions .btn {
+    flex: 1 1 100%;
+  }
+}
+
+.view .view-header {
+  margin-bottom: 0;
+}
+
+/* Teacher → Creations: per-item Delete and the Recently deleted bin. */
+.t-subtitle {
+  margin: 1rem 0 0.25rem;
+  font-size: 1.1rem;
+}
+
+.t-creations {
+  display: grid;
+  gap: 0.5rem;
+  max-height: 22rem;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.t-creation {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem;
+  border-radius: var(--radius-tile);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.t-creation-thumb {
+  flex: none;
+  width: 4.5rem;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 0.6rem;
+  background: var(--grape-50);
+}
+
+.t-creation-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  font-weight: 700;
+}
+
+.t-creation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.t-creation-deleted .t-creation-thumb {
+  opacity: 0.6;
+}
+
+@media (max-width: 639px) {
+  .t-creation {
+    flex-wrap: wrap;
+  }
+  .t-creation-actions {
     flex: 1 1 100%;
   }
 }

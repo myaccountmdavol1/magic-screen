@@ -1,0 +1,268 @@
+/* Step navigation (ease-of-use A1 + A4): big Next arrow, hold-to-leave Home, solid nav band,
+   nudges, kid-proof stepper, stop dialog and grown-up toast. Tokens only. Selectors are a
+   notch more specific than components.css / steps.css so this file wins regardless of order. */
+
+/* ---------- Heading + speaker ---------- */
+
+.step-title-row .speak-btn {
+  width: var(--touch-min);
+  height: var(--touch-min);
+  flex: none;
+}
+
+.step-header h1:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---------- Big Next arrow ---------- */
+
+.nav-row .nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: var(--touch-min);
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.nav-arrow-caption {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--grape-700);
+  white-space: nowrap;
+}
+
+.nav-arrow-circle {
+  display: grid;
+  width: 5rem;
+  height: 5rem;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  transition: transform 120ms ease, box-shadow 120ms ease, background 200ms ease, color 200ms ease;
+}
+
+/* SPEC colour language: blue = go forward. */
+.nav-arrow.ready .nav-arrow-circle {
+  background: var(--grape-500);
+  color: #fff;
+  box-shadow: 0 6px 0 var(--grape-600);
+}
+
+.nav-arrow.ready:active .nav-arrow-circle {
+  transform: translateY(4px);
+  box-shadow: 0 2px 0 var(--grape-600);
+}
+
+/* Greyed, but still a button: a tap explains what's missing. */
+.nav-arrow.waiting .nav-arrow-circle {
+  background: var(--grape-100);
+  color: var(--grape-400);
+  box-shadow: 0 6px 0 var(--grape-200);
+}
+
+.nav-arrow.waiting .nav-arrow-caption {
+  color: var(--grape-600);
+}
+
+.nav-arrow.pulse .nav-arrow-circle {
+  animation: next-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes next-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 6px 0 var(--grape-600), 0 0 0 0 rgba(47, 143, 239, 0.45);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 6px 0 var(--grape-600), 0 0 0 0.9rem rgba(47, 143, 239, 0);
+  }
+}
+
+@keyframes arrow-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 6px 0 var(--mint-edge), 0 0 0 0 rgba(16, 185, 129, 0.45);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 6px 0 var(--mint-edge), 0 0 0 0.9rem rgba(16, 185, 129, 0);
+  }
+}
+
+@media (max-width: 639px) {
+  .nav-row .nav-arrow {
+    flex: 0 0 auto;
+  }
+  .nav-arrow-circle {
+    width: 4.5rem;
+    height: 4.5rem;
+  }
+  .nav-arrow-caption {
+    font-size: 0.85rem;
+  }
+}
+
+/* ---------- Hold-to-leave Home (step 1) ---------- */
+
+.hold-back {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.hold-back-icon {
+  position: relative;
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+}
+
+.hold-back .hold-ring-fill {
+  stroke: var(--grape-700);
+}
+
+/* ---------- Nudges (blocked tap, idle re-prompt) ---------- */
+
+.step-shell.nudge-choice [data-nudge],
+.step-shell.nudge-body > .step-body {
+  animation: choice-wiggle 0.8s ease-in-out;
+}
+
+.step-shell.nudge-next .nav-arrow-circle {
+  animation: arrow-wiggle 0.8s ease-in-out;
+}
+
+@keyframes choice-wiggle {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0);
+  }
+  15% {
+    transform: translateX(-10px) rotate(-1deg);
+  }
+  35% {
+    transform: translateX(9px) rotate(1deg);
+  }
+  55% {
+    transform: translateX(-6px) rotate(-0.5deg);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+@keyframes arrow-wiggle {
+  0%,
+  100% {
+    transform: translateX(0) scale(1);
+  }
+  20% {
+    transform: translateX(8px) scale(1.12);
+  }
+  40% {
+    transform: translateX(-4px) scale(1.06);
+  }
+  60% {
+    transform: translateX(8px) scale(1.12);
+  }
+  80% {
+    transform: translateX(0) scale(1.04);
+  }
+}
+
+/* ---------- Solid nav band (never floats over world tiles) ---------- */
+
+@media (max-width: 639px) {
+  .make-step .step-shell > .nav-row {
+    background: rgba(255, 255, 255, 0.97);
+  }
+}
+
+@media (min-width: 640px) {
+  /* Was a see-through floating row: Home sat on The Moon, Next on News Desk. Now an opaque
+     band flush with the panel's bottom edge; tiles scroll out from under it, never behind. */
+  .make-step .step-shell > .nav-row {
+    bottom: 0;
+    margin: auto -1.5rem -1.5rem;
+    padding: 0.85rem 1.5rem max(0.85rem, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--grape-100);
+    border-radius: 0 0 var(--radius-panel) var(--radius-panel);
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 -10px 24px rgba(27, 79, 156, 0.08);
+    pointer-events: auto;
+  }
+}
+
+/* ---------- Stepper: progress only, not tappable ---------- */
+
+.stepper-progress .step-btn {
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.stepper-progress .step-btn.locked {
+  opacity: 0.52;
+}
+
+/* ---------- Stop dialog (picture-only) ---------- */
+
+.modal.stop-dialog {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  width: min(100%, 20rem);
+  padding: 2rem 1.5rem 1.5rem;
+}
+
+.stop-keep {
+  display: grid;
+  width: 9rem;
+  height: 9rem;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--mint-500);
+  color: #fff;
+  box-shadow: 0 8px 0 var(--mint-edge);
+  animation: arrow-pulse 1.3s ease-in-out infinite;
+}
+
+.stop-keep:active {
+  transform: translateY(4px);
+  box-shadow: 0 4px 0 var(--mint-edge);
+}
+
+.stop-home {
+  display: grid;
+  width: var(--touch-min);
+  height: var(--touch-min);
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--grape-50);
+  color: var(--text-muted); /* the quiet choice: small and grey */
+  box-shadow: 0 3px 0 var(--grape-100);
+}
+
+/* ---------- Grown-up toast (tap to close) ---------- */
+
+.toast-host .toast-grownup {
+  border: 0;
+  font-family: var(--font-body);
+  pointer-events: auto;
+  cursor: pointer;
+}

@@ -143,15 +143,90 @@ export async function startCamera({ facing, resolution }: StartCameraOptions): P
   }
 }
 
-/** Microphone for video recordings. Returns null (silent video) rather than blocking recording. */
-export async function getMic(): Promise<MediaStream | null> {
-  if (!hasMediaDevices()) return null
+export type MicStatus = 'on' | 'denied' | 'unavailable'
+
+export interface MicResult {
+  stream: MediaStream | null
+  /** 'denied' = the grown-up (or the browser) said no; 'unavailable' = no mic / no API. */
+  status: MicStatus
+}
+
+/**
+ * Microphone for video recordings. Never throws: a silent video beats no video, but
+ * the caller learns *why* there is no sound so it can tell the child.
+ */
+export async function requestMic(): Promise<MicResult> {
+  if (!hasMediaDevices()) return { stream: null, status: 'unavailable' }
   try {
-    return await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: false,
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
-  } catch {
-    return null
+    return { stream, status: 'on' }
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name
+    const denied = name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError'
+    return { stream: null, status: denied ? 'denied' : 'unavailable' }
   }
+}
+
+/** Microphone for video recordings. Returns null (silent video) rather than blocking recording. */
+export async function getMic(): Promise<MediaStream | null> {
+  return (await requestMic()).stream
+}
+
+/** How long a visible page tolerates a muted camera before calling it asleep. */
+export const MUTE_GRACE_MS = 1500
+
+/**
+ * Watch a live camera stream for the OS taking it away: the track ends (unplugged,
+ * revoked, another app grabbed it) or stays muted while the page is visible (iPad
+ * Split View / Control Center). Backgrounding mutes the track too; that is ignored
+ * while hidden and re-checked when the page comes back.
+ * `onChange(true)` = the camera fell asleep, `onChange(false)` = it woke up on its own.
+ * Our own `handle.stop()` never fires 'ended' (per spec), so it does not trigger this.
+ * Returns an unsubscribe function.
+ */
+export function watchCamera(stream: MediaStream, onChange: (asleep: boolean) => void): () => void {
+  const tracks = stream.getVideoTracks()
+  if (tracks.length === 0) return () => {}
+  let muteTimer = 0
+  let asleep = false
+  const set = (v: boolean) => {
+    if (v === asleep) return
+    asleep = v
+    onChange(v)
+  }
+  const isHidden = () => typeof document !== 'undefined' && document.hidden
+  const check = () => {
+    window.clearTimeout(muteTimer)
+    if (tracks.some((t) => t.readyState === 'ended')) return set(true)
+    if (tracks.some((t) => t.muted)) {
+      if (isHidden()) return
+      muteTimer = window.setTimeout(() => {
+        if (!isHidden() && tracks.some((t) => t.muted || t.readyState === 'ended')) set(true)
+      }, MUTE_GRACE_MS)
+      return
+    }
+    set(false)
+  }
+  for (const t of tracks) {
+    t.addEventListener('ended', check)
+    t.addEventListener('mute', check)
+    t.addEventListener('unmute', check)
+  }
+  return () => {
+    window.clearTimeout(muteTimer)
+    for (const t of tracks) {
+      t.removeEventListener('ended', check)
+      t.removeEventListener('mute', check)
+      t.removeEventListener('unmute', check)
+    }
+  }
+}
+
+/** True when the stream's camera track is gone or still muted (used on returning to the app). */
+export function cameraLooksAsleep(stream: MediaStream): boolean {
+  const tracks = stream.getVideoTracks()
+  return tracks.length === 0 || tracks.some((t) => t.readyState === 'ended' || t.muted)
 }

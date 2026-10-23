@@ -65,10 +65,16 @@ export function ParentGate({ open, onSuccess, onClose }: { open: boolean; onSucc
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeRef.current()
-      else if (/^[0-9]$/.test(e.key)) pressRef.current(e.key as (typeof KEYS)[number])
-      else if (e.key === 'Backspace') pressRef.current('del')
-      else if (e.key === 'Enter') pressRef.current('ok')
+      if (e.key === 'Escape') return closeRef.current()
+      let k: (typeof KEYS)[number] | null = null
+      if (/^[0-9]$/.test(e.key)) k = e.key as (typeof KEYS)[number]
+      else if (e.key === 'Backspace') k = 'del'
+      else if (e.key === 'Enter') k = 'ok'
+      if (!k) return
+      // The keypad's first key has focus: without this, Enter would also "click" it and
+      // type a stray digit into the (fresh) answer right after checking.
+      e.preventDefault()
+      pressRef.current(k)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

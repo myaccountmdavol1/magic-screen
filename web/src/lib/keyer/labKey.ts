@@ -201,8 +201,19 @@ export function averageLinear(samples: RGB[]): RGB | null {
   return [linearToSrgb(r / n), linearToSrgb(g / n), linearToSrgb(b / n)]
 }
 
-/** CIEDE2000 (kL = kC = kH = 1). For warnings and drift checks only, never for alpha. */
-export function deltaE00(l1: Lab, l2: Lab): number {
+/** Median of a list (mean of the middle two for even lengths); NaN when empty. */
+export function median(xs: readonly number[]): number {
+  if (!xs.length) return NaN
+  const s = [...xs].sort((a, b) => a - b)
+  const m = s.length >> 1
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
+
+/**
+ * CIEDE2000 (kC = kH = 1; kL = 1 unless given, > 1 weights lightness differences less).
+ * For warnings, drift checks and key voting only, never for alpha.
+ */
+export function deltaE00(l1: Lab, l2: Lab, kL = 1): number {
   const rad = Math.PI / 180
   const C1 = Math.hypot(l1[1], l1[2])
   const C2 = Math.hypot(l2[1], l2[2])
@@ -249,7 +260,7 @@ export function deltaE00(l1: Lab, l2: Lab): number {
   const SC = 1 + 0.045 * cb
   const SH = 1 + 0.015 * cb * T
   const RT = -Math.sin(2 * dTheta * rad) * RC
-  const l = dL / SL
+  const l = dL / (kL * SL)
   const c = dC / SC
   const h = dH / SH
   return Math.sqrt(l * l + c * c + h * h + RT * c * h)

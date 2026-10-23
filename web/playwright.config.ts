@@ -7,7 +7,8 @@ import path from 'node:path'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const FAKE_CAMERA = path.join(here, 'e2e', 'fixtures', 'fake-greenscreen.y4m')
-const PORT = 5174
+// PW_PORT lets parallel agents/servers pick their own port (default 5174).
+const PORT = Number(process.env.PW_PORT ?? 5174)
 
 const chromiumMedia = {
   args: [
@@ -21,6 +22,8 @@ const chromiumMedia = {
 
 export default defineConfig({
   testDir: './e2e',
+  // Only *.spec.ts: e2e/harness also holds vitest unit tests (*.test.ts).
+  testMatch: '**/*.spec.ts',
   // Each test drives a live camera + WebGL keyer; keep them serial per worker and
   // give the camera/recording flows room to breathe.
   timeout: 90_000,

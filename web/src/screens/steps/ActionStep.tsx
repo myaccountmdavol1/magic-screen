@@ -1,5 +1,5 @@
 // Step 4: Photo or Video, then one giant hero button with a spoken 3-2-1.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from '../../state/store'
 import type { OutputKind } from '../../types'
 import { StepShell } from '../../components/StepShell'
@@ -8,21 +8,30 @@ import { Icon } from '../../components/Icon'
 import { toast } from '../../components/Toast'
 import { useStage } from '../../lib/useStage'
 import { capturePhoto, makeThumb, startRecording, type RecordingHandle } from '../../lib/recorder'
-import { getMic } from '../../lib/camera'
+import { requestMic, type MicResult } from '../../lib/camera'
 import { playSound } from '../../lib/sound'
 import { speak } from '../../lib/voice'
 
-type Phase = 'idle' | 'countdown' | 'recording' | 'busy'
+/**
+ * idle → countdown (3-2-1) → starting (overlay stays up until the recorder really runs)
+ * → recording → busy (saving) → Keep.
+ */
+type Phase = 'idle' | 'countdown' | 'starting' | 'recording' | 'busy'
+/** off = teacher turned "Record sound" off (never ask); asking = permission prompt up. */
+type MicState = 'off' | 'asking' | 'on' | 'denied'
 
 const RING_R = 86
 const RING_C = 2 * Math.PI * RING_R
-
-function formatTime(sec: number): string {
-  const s = Math.max(0, Math.floor(sec))
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-}
+/** Stop taps in the first 2 s are ignored, so a double-tap can't save a 1-second clip. */
+export const STOP_GUARD_SEC = 2
+/** The ring turns orange for the last few seconds. */
+const LOW_TIME_SEC = 3
 
 const wait = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms))
+
+function stopStream(s: MediaStream | null) {
+  s?.getTracks().forEach((t) => t.stop())
+}
 
 export default function ActionStep() {
   const outputKind = useApp((s) => s.outputKind)
@@ -31,19 +40,69 @@ export default function ActionStep() {
   const setCapture = useApp((s) => s.setCapture)
   const goStep = useApp((s) => s.goStep)
   const stage = useStage()
+  const recordSound = settings.recordSound ?? true
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [count, setCount] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [flash, setFlash] = useState(0)
+  const [recPulse, setRecPulse] = useState(0)
+  const [mic, setMic] = useState<MicState>(recordSound ? 'asking' : 'off')
 
   // Refs so async flows can see the latest values and bail out after unmount.
   const alive = useRef(true)
   const recRef = useRef<RecordingHandle | null>(null)
   const micRef = useRef<MediaStream | null>(null)
+  const micAsk = useRef<Promise<MicResult> | null>(null)
   const timerRef = useRef(0)
   const stageRef = useRef(stage)
   stageRef.current = stage
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
+
+  const releaseMic = useCallback(() => {
+    stopStream(micRef.current)
+    micRef.current = null
+    micAsk.current = null
+  }, [])
+
+  /**
+   * Ask for the mic as soon as Video is picked (not after the countdown), so the
+   * permission prompt never lands in the middle of the 3-2-1. Never throws.
+   */
+  const ensureMic = useCallback(async (): Promise<MediaStream | null> => {
+    if (!(useApp.getState().settings.recordSound ?? true)) {
+      setMic('off')
+      return null
+    }
+    const live = micRef.current
+    if (live) {
+      if (live.getAudioTracks().some((t) => t.readyState === 'live')) return live
+      // The OS ended the mic (call, Siri, another app): ask again instead of handing a
+      // dead track to MediaRecorder (Safari can refuse to start, or record nothing).
+      stopStream(live)
+      micRef.current = null
+      micAsk.current = null
+    }
+    if (!micAsk.current) {
+      setMic('asking')
+      const ask = requestMic()
+      micAsk.current = ask
+      void ask.then((res) => {
+        if (micAsk.current !== ask || !alive.current) {
+          // Released (or unmounted) while the prompt was up: let the mic go right away,
+          // or the iPad's recording indicator stays on.
+          stopStream(res.stream)
+          return
+        }
+        micRef.current = res.stream
+        setMic(res.status === 'on' ? 'on' : 'denied')
+        if (res.status !== 'on') speak('No sound this time.')
+      })
+    }
+    const res = await micAsk.current
+    return micRef.current ?? (res.status === 'on' ? res.stream : null)
+  }, [])
 
   useEffect(() => {
     alive.current = true
@@ -53,12 +112,20 @@ export default function ActionStep() {
       window.clearInterval(timerRef.current)
       recRef.current?.stop().catch(() => {})
       recRef.current = null
-      micRef.current?.getTracks().forEach((t) => t.stop())
-      micRef.current = null
+      releaseMic()
     }
-  }, [])
+  }, [releaseMic])
 
   const isVideo = outputKind === 'video'
+
+  // Coming back to an already-picked Video (e.g. "Try again" from Keep): get the mic ready.
+  useEffect(() => {
+    if (isVideo) void ensureMic()
+    else {
+      releaseMic()
+      setMic(recordSound ? 'asking' : 'off')
+    }
+  }, [isVideo, recordSound, ensureMic, releaseMic])
 
   const choose = (k: OutputKind) => {
     if (phase !== 'idle') return
@@ -69,14 +136,14 @@ export default function ActionStep() {
 
   const countdown = async () => {
     for (let n = settings.countdownSec; n > 0; n--) {
-      if (!alive.current) return false
+      if (!alive.current || document.hidden) return false
       setCount(n)
       playSound('countdown')
       speak(String(n))
       await wait(1000)
     }
     setCount(0)
-    return alive.current
+    return alive.current && !document.hidden
   }
 
   const snapPhoto = async () => {
@@ -91,64 +158,85 @@ export default function ActionStep() {
     goStep('keep')
   }
 
-  const stopVideo = async () => {
-    const handle = recRef.current
-    if (!handle) return
-    recRef.current = null
-    window.clearInterval(timerRef.current)
-    setPhase('busy')
-    playSound('stop')
-    const canvas = stageRef.current.canvasRef.current
-    // Grab the thumbnail from the live canvas now, before anything changes.
-    const thumbPromise = canvas ? makeThumb(canvas) : Promise.resolve('')
-    try {
-      const res = await handle.stop()
-      micRef.current?.getTracks().forEach((t) => t.stop())
-      micRef.current = null
-      const thumbDataUrl = await thumbPromise
-      if (!alive.current) return
-      setCapture({
-        kind: 'video',
-        composite: res.composite,
-        mime: res.mime,
-        durationSec: res.durationSec,
-        thumbDataUrl,
-      })
-      goStep('keep')
-    } catch {
-      if (alive.current) {
-        toast("Oops, the video didn't save. Try again!")
-        setPhase('idle')
+  const stopVideo = useCallback(
+    async ({ savedOnLeave = false }: { savedOnLeave?: boolean } = {}) => {
+      const handle = recRef.current
+      if (!handle) return
+      recRef.current = null
+      window.clearInterval(timerRef.current)
+      setPhase('busy')
+      if (!savedOnLeave) playSound('stop')
+      const canvas = stageRef.current.canvasRef.current
+      // Grab the thumbnail from the live canvas now, before anything changes.
+      const thumbPromise = canvas ? makeThumb(canvas).catch(() => '') : Promise.resolve('')
+      try {
+        const res = await handle.stop()
+        const thumbDataUrl = await thumbPromise
+        if (!alive.current) return
+        setCapture({
+          kind: 'video',
+          composite: res.composite,
+          mime: res.mime,
+          durationSec: res.durationSec,
+          thumbDataUrl,
+          ...(savedOnLeave ? { savedOnLeave: true } : {}),
+        })
+        goStep('keep')
+      } catch {
+        if (alive.current) {
+          toast('Oops! Try again.')
+          setPhase('idle')
+        }
       }
+    },
+    [setCapture, goStep],
+  )
+
+  // A2: the iPad went to the home screen / another app mid-recording. Save what we
+  // have (the camera is about to freeze anyway) and land on Keep.
+  useEffect(() => {
+    const onVis = () => {
+      if (!document.hidden) return
+      if (recRef.current && phaseRef.current === 'recording') void stopVideo({ savedOnLeave: true })
     }
-  }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [stopVideo])
 
   const startVideo = async () => {
     const canvas = stageRef.current.canvasRef.current
     if (!canvas) throw new Error('no stage')
-    // Mic is optional: a silent video beats no video.
-    const mic = await getMic()
-    if (!alive.current) {
-      // Unmounted while the permission prompt was up: the cleanup already ran, so
-      // release the mic here or the iPad's recording indicator stays on.
-      mic?.getTracks().forEach((t) => t.stop())
+    setPhase('starting')
+    // Usually already granted/denied on the Video tap; a silent video beats no video.
+    const audio = await ensureMic()
+    if (!alive.current) return
+    const handle = startRecording({ canvas, audio })
+    recRef.current = handle
+    await handle.started
+    if (!alive.current) return
+    if (document.hidden) {
+      // Left during the hand-off: nothing worth keeping yet.
+      recRef.current = null
+      await handle.stop().catch(() => undefined)
+      setPhase('idle')
       return
     }
-    micRef.current = mic
-    const handle = startRecording({ canvas, audio: micRef.current })
-    recRef.current = handle
     playSound('start')
     setElapsed(0)
     setPhase('recording')
+    setRecPulse((n) => n + 1)
+    speak("We're filming! Tap the square to stop.")
     timerRef.current = window.setInterval(() => {
       const t = handle.elapsed()
       setElapsed(t)
-      if (t >= settings.maxVideoSec) void stopVideo()
+      if (t >= useApp.getState().settings.maxVideoSec) void stopVideo()
     }, 200)
   }
 
   const onHero = async () => {
     if (phase === 'recording') {
+      // Ignore the excited double-tap right after it starts.
+      if ((recRef.current?.elapsed() ?? 0) < STOP_GUARD_SEC) return
       void stopVideo()
       return
     }
@@ -159,7 +247,13 @@ export default function ActionStep() {
     }
     setPhase('countdown')
     try {
-      if (!(await countdown())) return
+      if (!(await countdown())) {
+        if (alive.current) {
+          setCount(0)
+          setPhase('idle')
+        }
+        return
+      }
       if (isVideo) await startVideo()
       else {
         setPhase('busy')
@@ -174,14 +268,17 @@ export default function ActionStep() {
   }
 
   const recording = phase === 'recording'
-  const progress = Math.min(1, elapsed / Math.max(1, settings.maxVideoSec))
+  const maxSec = Math.max(1, settings.maxVideoSec)
+  const used = recording || phase === 'busy' ? Math.min(1, elapsed / maxSec) : 0
+  const low = recording && maxSec - elapsed <= LOW_TIME_SEC
   const heroLabel = recording ? 'Stop' : isVideo ? 'Start filming' : 'Take a photo'
+  const showWait = phase === 'starting' || (phase === 'countdown' && count === 0 && isVideo)
 
   return (
     <StepShell
       title={isVideo ? 'Film it!' : 'Snap it!'}
-      subtitle={recording ? 'Tap the big button to stop.' : 'Pick photo or video. Then tap the big button!'}
-      speak="Photo or video? Then tap the big button!"
+      subtitle={recording ? 'Tap the square to stop.' : 'Tap the big button!'}
+      speak="Tap the big button!"
       layout="stage"
       back={phase === 'idle' ? { label: 'Back', onClick: () => goStep('stickers') } : undefined}
       aside={
@@ -217,7 +314,13 @@ export default function ActionStep() {
 
           <div className="hero-shell">
             {isVideo && (
-              <svg className="hero-progress" viewBox="0 0 192 192" aria-hidden="true">
+              // Time left: a full ring that drains while filming (no digits for pre-readers).
+              <svg
+                className={`hero-progress${low ? ' low' : ''}`}
+                viewBox="0 0 192 192"
+                role="img"
+                aria-label={recording ? `${Math.max(0, Math.ceil(maxSec - elapsed))} seconds left` : `Up to ${maxSec} seconds`}
+              >
                 <circle className="track" cx="96" cy="96" r={RING_R} />
                 <circle
                   className="fill"
@@ -225,7 +328,7 @@ export default function ActionStep() {
                   cy="96"
                   r={RING_R}
                   strokeDasharray={RING_C}
-                  strokeDashoffset={RING_C * (1 - progress)}
+                  strokeDashoffset={RING_C * used}
                 />
               </svg>
             )}
@@ -234,7 +337,7 @@ export default function ActionStep() {
               type="button"
               className={`hero-btn${recording ? ' recording' : ''}`}
               aria-label={heroLabel}
-              disabled={phase === 'countdown' || phase === 'busy'}
+              disabled={phase === 'countdown' || phase === 'starting' || phase === 'busy'}
               onClick={onHero}
             >
               {recording ? (
@@ -246,12 +349,6 @@ export default function ActionStep() {
               )}
             </button>
           </div>
-
-          {isVideo && (
-            <div className={`timer${recording ? ' recording' : ''}`} aria-live="off">
-              {formatTime(elapsed)} <span className="timer-max">/ {formatTime(settings.maxVideoSec)}</span>
-            </div>
-          )}
         </div>
       }
     >
@@ -263,13 +360,50 @@ export default function ActionStep() {
             </span>
           </div>
         )}
+        {showWait && (
+          // The recorder is spinning up: keep the countdown tint so there is no dead gap.
+          <div className="countdown countdown-wait" aria-hidden="true">
+            <span className="countdown-wait-dot" />
+          </div>
+        )}
+        {recPulse > 0 && recording && (
+          // Filming started: the stage edge pulses red (the middle stays clear for the child's face).
+          <span key={recPulse} className="rec-pulse" aria-hidden="true" />
+        )}
         {flash > 0 && <span key={flash} className="shutter-flash" aria-hidden="true" />}
         {recording && (
-          <span className="rec-badge">
-            <span className="rec-dot" /> {formatTime(elapsed)}
+          <span className="rec-badge" role="status">
+            <span className="rec-dot" /> REC
+          </span>
+        )}
+        {isVideo && mic === 'denied' && (phase === 'idle' || recording) && (
+          <span className="mic-off-badge" role="status">
+            <MicOffIcon /> No sound this time
           </span>
         )}
       </StageSlot>
     </StepShell>
+  )
+}
+
+/** Microphone with a slash: "this video has no sound". Inline so Icon.tsx stays untouched. */
+function MicOffIcon() {
+  return (
+    <svg
+      width={24}
+      height={24}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 12.2 4.7M19 11v0" />
+      <path d="M12 18v3M8.5 21h7" />
+      <path d="M4 4l16 16" />
+    </svg>
   )
 }

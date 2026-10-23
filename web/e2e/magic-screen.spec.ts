@@ -1,10 +1,12 @@
 // Magic Screen end-to-end flows in Chromium with a fake green-screen camera.
 import {
   expect,
+  holdButton,
   keepToHome,
   makePhoto,
   meToSnap,
   openHome,
+  openTeacher,
   pickWorld,
   stepHeading,
   test,
@@ -201,7 +203,7 @@ test('teacher gate: hold the gear, a wrong answer is rejected, the right answer 
   await shot('teacher')
 })
 
-test('view a creation and delete it', async ({ page, shot }) => {
+test('view a creation (no kid Delete), delete it in Teacher, then restore it from Recently deleted', async ({ page, shot }) => {
   await makePhoto(page)
   await keepToHome(page, 1)
 
@@ -211,25 +213,87 @@ test('view a creation and delete it', async ({ page, shot }) => {
   await expect
     .poll(() => picture.evaluate((el: HTMLImageElement) => (el.complete ? el.naturalWidth : 0)))
     .toBeGreaterThan(100)
+  await expect(page.getByRole('heading', { level: 1, name: /^My photo · / })).toBeVisible()
+  // Kids can save but not delete.
+  await expect(page.getByRole('button', { name: 'Save' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Delete/ })).toHaveCount(0)
   await shot('view')
+  await page.locator('.nav-row').getByRole('button', { name: 'Home' }).click()
+  await expect(page.locator('.gallery-grid .creation-tile:not(.skeleton)')).toHaveCount(1)
 
-  // Cancel first: nothing is deleted.
-  await page.getByRole('button', { name: 'Delete' }).click()
-  const confirm = page.getByRole('alertdialog', { name: 'Delete this?' })
-  await expect(confirm).toBeVisible()
-  await shot('confirm')
-  await confirm.getByRole('button', { name: 'Keep it' }).click()
-  await expect(confirm).toHaveCount(0)
-  await expect(picture).toBeVisible()
+  // A grown-up deletes it in Teacher → Creations: it moves to Recently deleted.
+  await openTeacher(page)
+  const saved = page.getByRole('list', { name: 'Saved creations' })
+  await expect(saved.getByRole('listitem')).toHaveCount(1)
+  await saved.getByRole('button', { name: /^Delete Photo · / }).click()
+  const bin = page.getByRole('list', { name: 'Recently deleted' })
+  await expect(bin.getByRole('listitem')).toHaveCount(1)
+  await expect(bin).toContainText('7 days left')
+  await expect(saved).toHaveCount(0)
+  await bin.scrollIntoViewIfNeeded()
+  await shot('teacher-recently-deleted')
 
-  await page.getByRole('button', { name: 'Delete' }).click()
-  await confirm.getByRole('button', { name: 'Delete' }).click()
-  await expect(page.getByRole('button', { name: /Let's make!/ })).toBeVisible()
+  // Gone from the kids' gallery, even after a reload.
+  await page.getByRole('button', { name: 'Back home' }).click()
   await expect(page.getByText('Nothing here yet.')).toBeVisible()
   await expect(page.locator('.gallery-grid .creation-tile')).toHaveCount(0)
-  await shot('home-after-delete')
-
-  // Still gone after a reload (deleted from IndexedDB, not just the UI).
   await page.reload()
   await expect(page.getByText('Nothing here yet.')).toBeVisible()
+
+  // Restore brings it back.
+  await openTeacher(page)
+  await page.getByRole('list', { name: 'Recently deleted' }).getByRole('button', { name: /^Restore Photo · / }).click()
+  await expect(page.getByRole('list', { name: 'Saved creations' }).getByRole('listitem')).toHaveCount(1)
+  await expect(page.getByRole('list', { name: 'Recently deleted' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Back home' }).click()
+  await expect(page.locator('.gallery-grid .creation-tile:not(.skeleton)')).toHaveCount(1)
+  await shot('home-after-restore')
+})
+
+test('Me step: kids see 3 tools; a 3s hold on the stage gear opens Grown-up fix; Flip lasts the session only', async ({ page, shot }) => {
+  await openHome(page)
+  await pickWorld(page)
+  await expect(stepHeading(page, 'Me!')).toBeVisible()
+  await waitForLiveStage(page)
+
+  const aside = page.locator('.me-tools')
+  for (const name of ['Bigger', 'Smaller', 'Center me']) await expect(aside.getByRole('button', { name })).toBeVisible()
+  for (const name of ['Tap the green', 'Auto fix', 'Tighter edge', 'Looser edge', 'Flip camera']) {
+    await expect(page.getByRole('button', { name })).toHaveCount(0)
+  }
+  await page.getByRole('button', { name: 'Bigger' }).click()
+  await shot('me-kid-tools')
+
+  // The gear sits in the stage corner, not among the kid tools.
+  const hold = /Grown-up fix\. Press and hold/
+  await expect(aside.getByRole('button', { name: hold })).toHaveCount(0)
+  await expect(page.locator('.stage-slot').getByRole('button', { name: hold })).toBeVisible()
+  // A quick tap does nothing, and neither does a kid's 2s resting finger; a 3s hold opens it.
+  await page.getByRole('button', { name: hold }).click()
+  await page.waitForTimeout(400)
+  await expect(page.getByRole('region', { name: 'Grown-up fix' })).toHaveCount(0)
+  await holdButton(page, hold, 2200)
+  await expect(page.getByRole('region', { name: 'Grown-up fix' })).toHaveCount(0)
+  await holdButton(page, hold, 3400)
+  const drawer = page.getByRole('region', { name: 'Grown-up fix' })
+  await expect(drawer).toBeVisible()
+  // The fake camera shows a green screen, so the green tools appear once the mode is decided.
+  for (const name of ['Tap the green', 'Auto fix', 'Tighter edge', 'Looser edge', 'Flip camera']) {
+    await expect(drawer.getByRole('button', { name })).toBeVisible()
+  }
+  await shot('me-grown-up-fix')
+
+  const savedFacing = () =>
+    page.evaluate(() => {
+      const raw = localStorage.getItem('magicscreen.settings')
+      return raw ? (JSON.parse(raw) as { facing?: string }).facing ?? 'user' : 'user'
+    })
+  const before = await savedFacing()
+  await drawer.getByRole('button', { name: 'Flip camera' }).click()
+  await waitForLiveStage(page)
+  expect(await savedFacing()).toBe(before)
+
+  await drawer.getByRole('button', { name: 'Done' }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('button', { name: hold })).toBeVisible()
 })

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { useApp } from '../state/store'
 import { listCreations } from '../lib/storage'
 import { playSound } from '../lib/sound'
@@ -8,91 +8,32 @@ import { Panel } from '../components/Panel'
 import { Icon } from '../components/Icon'
 import { ParentGate } from '../components/ParentGate'
 import { toast } from '../components/Toast'
+import { HoldRing, useHold } from '../components/HoldRing'
 
 const HOLD_MS = 2000
-const RING_R = 30
-const RING_LEN = 2 * Math.PI * RING_R
 
 /**
  * Gear that must be held for 2 seconds. Kids tap; grown-ups hold. The ring
  * fills while holding so the teacher knows it's working.
  */
 function HoldGear({ onUnlock }: { onUnlock: () => void }) {
-  const [progress, setProgress] = useState(0)
-  const raf = useRef(0)
-  const startedAt = useRef(0)
-  const fired = useRef(false)
-
-  const stop = (showHint: boolean) => {
-    cancelAnimationFrame(raf.current)
-    raf.current = 0
-    if (showHint && !fired.current && startedAt.current && performance.now() - startedAt.current < HOLD_MS * 0.6) {
-      toast('Grown-ups: press and hold the gear')
-    }
-    startedAt.current = 0
-    setProgress(0)
-  }
-
-  const start = () => {
-    if (raf.current) return
-    fired.current = false
-    startedAt.current = performance.now()
-    const tick = (t: number) => {
-      const p = Math.min(1, (t - startedAt.current) / HOLD_MS)
-      setProgress(p)
-      if (p >= 1) {
-        fired.current = true
-        raf.current = 0
-        startedAt.current = 0
-        setProgress(0)
-        playSound('pop')
-        onUnlock()
-        return
-      }
-      raf.current = requestAnimationFrame(tick)
-    }
-    raf.current = requestAnimationFrame(tick)
-  }
-
-  useEffect(() => () => cancelAnimationFrame(raf.current), [])
-
-  const onKeyDown = (e: KeyboardEvent) => {
-    if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
-      e.preventDefault()
-      start()
-    }
-  }
-  const onKeyUp = (e: KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') stop(true)
-  }
+  const { progress, handlers } = useHold({
+    ms: HOLD_MS,
+    onDone: () => {
+      playSound('pop')
+      onUnlock()
+    },
+    onShortTap: () => toast('Grown-ups: press and hold the gear', { grownup: true }),
+  })
 
   return (
     <button
       type="button"
       className="hold-gear"
       aria-label="Teacher settings. Press and hold for 2 seconds."
-      onPointerDown={(e) => {
-        e.currentTarget.setPointerCapture?.(e.pointerId)
-        start()
-      }}
-      onPointerUp={() => stop(true)}
-      onPointerCancel={() => stop(false)}
-      onLostPointerCapture={() => stop(false)}
-      onKeyDown={onKeyDown}
-      onKeyUp={onKeyUp}
-      onContextMenu={(e) => e.preventDefault()}
+      {...handlers}
     >
-      <svg className="hold-ring" viewBox="0 0 68 68" aria-hidden="true">
-        <circle cx="34" cy="34" r={RING_R} className="hold-ring-track" />
-        <circle
-          cx="34"
-          cy="34"
-          r={RING_R}
-          className="hold-ring-fill"
-          strokeDasharray={RING_LEN}
-          strokeDashoffset={RING_LEN * (1 - progress)}
-        />
-      </svg>
+      <HoldRing progress={progress} />
       <Icon name="gear" size={26} />
     </button>
   )

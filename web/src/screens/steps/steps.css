@@ -303,6 +303,150 @@
   animation: tool-wiggle 900ms ease-in-out infinite;
 }
 
+/* Me: three big kid tools; the fixing tools sit in a grown-up drawer behind a hold. */
+.me-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.tool-grid.tool-grid-kid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (min-width: 1024px) {
+  .tool-grid.tool-grid-kid {
+    grid-template-columns: 1fr;
+  }
+  .tool-grid-kid .tool-btn.tool-big {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 0.9rem;
+    padding-inline: 1rem;
+  }
+}
+
+.tool-btn.tool-big {
+  min-height: 7rem;
+  font-size: 1.1rem;
+}
+
+.tool-btn.tool-big .tool-icon {
+  width: 4.25rem;
+  height: 4.25rem;
+}
+
+/* Grown-up fix gear: small, tucked in the stage's top-right corner, away from the kid tools. */
+.hold-gear.stage-fix-gear {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.stage-fix-gear > svg:not(.hold-ring) {
+  width: 22px;
+  height: 22px;
+}
+
+.fix-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.8rem;
+  border: 3px dashed var(--grape-200);
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.fix-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.fix-drawer-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--text-muted);
+}
+
+.fix-drawer-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--grape-500);
+  color: #fff;
+  font-family: var(--font-body);
+  font-weight: 800;
+  box-shadow: 0 3px 0 var(--grape-700);
+  cursor: pointer;
+}
+
+.tool-grid.tool-grid-fix {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* While a grown-up is fixing, shrink the kid tools so the whole drawer fits beside the stage. */
+.me-tools.fix-open .tool-btn.tool-big {
+  min-height: 4.5rem;
+}
+
+.me-tools.fix-open .tool-btn.tool-big .tool-icon {
+  width: 3rem;
+  height: 3rem;
+}
+
+.tool-grid-fix .tool-btn {
+  min-height: 5rem;
+  font-size: 0.85rem;
+}
+
+/* Wide screens: the open drawer sits beside the stage, so fold the kid tools into one
+   compact row; otherwise the drawer's second row hides under the Back/Next band. */
+@media (min-width: 1024px) {
+  .me-tools.fix-open .tool-grid.tool-grid-kid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .me-tools.fix-open .tool-grid-kid .tool-btn.tool-big {
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    min-height: 4.25rem;
+    padding: 0.4rem 0.3rem;
+    font-size: 0.9rem;
+  }
+  .me-tools.fix-open .tool-btn.tool-big .tool-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+  .me-tools.fix-open {
+    gap: 0.6rem;
+  }
+  .me-tools.fix-open .fix-drawer {
+    gap: 0.5rem;
+    padding: 0.6rem;
+  }
+  .me-tools.fix-open .tool-grid-fix .tool-btn {
+    min-height: 4.5rem;
+    gap: 0.25rem;
+  }
+  .me-tools.fix-open .tool-grid-fix .tool-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+}
+
 @keyframes tool-wiggle {
   0%, 100% { transform: rotate(0deg); }
   25% { transform: rotate(-10deg); }
@@ -745,7 +889,8 @@
 .keep-result {
   position: relative;
   /* Cap by height too so Save stays on screen on iPad landscape. */
-  width: min(100%, 52rem, calc((100dvh - 29rem) * 16 / 9));
+  /* 31.5rem = header + stepper + actions + the solid nav band with its 80px arrow. */
+  width: min(100%, 52rem, calc((100dvh - 31.5rem) * 16 / 9));
   min-width: min(100%, 18rem);
   overflow: hidden;
   border-radius: var(--radius-card);
@@ -782,4 +927,146 @@
   place-items: center;
   min-height: 12rem;
   color: var(--grape-200);
+}
+
+/* ---------- 4 Film: start hand-off, REC pulse, time ring, no-sound badge (A6) ---------- */
+
+.hero-progress.low .fill { stroke: var(--tang-500); }
+
+/* Countdown tint stays up while the recorder spins up: no dead gap. */
+.countdown-wait-dot {
+  width: clamp(4rem, 12vw, 7rem);
+  height: clamp(4rem, 12vw, 7rem);
+  border: 8px solid #fff;
+  border-radius: var(--radius-pill);
+  background: var(--bubble-500);
+  box-shadow: 0 8px 0 var(--bubble-edge);
+  animation: wait-throb 700ms ease-in-out infinite alternate;
+}
+
+@keyframes wait-throb {
+  from { transform: scale(0.85); }
+  to { transform: scale(1.08); }
+}
+
+.rec-pulse {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 10px var(--bubble-500);
+  pointer-events: none;
+  animation: rec-pulse 700ms ease-in-out 3 both;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+.mic-off-badge {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.85rem 0.35rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: #fff;
+  color: var(--grape-700);
+  font-weight: 800;
+  box-shadow: 0 3px 0 var(--grape-200);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .countdown-wait-dot { animation: none; }
+  .rec-pulse { animation-duration: 1ms; animation-delay: 0s; opacity: 0; }
+}
+
+/* ---------- 5 Keep: gallery save failed (A8) ---------- */
+
+.keep-unsaved {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  width: min(100%, 40rem);
+  padding: 0.85rem 1.1rem;
+  border: 4px solid var(--sun-400);
+  border-radius: var(--radius-card);
+  background: var(--sun-100);
+  color: var(--grape-700);
+  box-shadow: 0 5px 0 var(--sun-edge);
+}
+
+.keep-unsaved-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  border-radius: var(--radius-pill);
+  background: var(--sun-400);
+  color: var(--grape-700);
+}
+
+.keep-unsaved-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.keep-unsaved-text strong {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+}
+
+.keep-unsaved-reason { color: var(--text-muted); font-size: 0.95rem; }
+
+.btn.keep-save-pulse {
+  animation: keep-save-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes keep-save-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.07); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn.keep-save-pulse { animation: none; outline: 5px solid var(--sun-400); outline-offset: 3px; }
+}
+
+/* Not saved: the warning and the pulsing Save come first, so they are on screen
+   without scrolling (phones would otherwise push them under the nav bar). */
+.keep.is-unsaved .keep-unsaved { order: -2; }
+.keep.is-unsaved .keep-actions { order: -1; }
+
+/* Wide landscape (iPad): the card and Save sit beside the picture, so picture, card and
+   Save all fit above the nav band without scrolling. 26rem = header + stepper + the nav
+   band (no actions row under the picture in this layout). */
+@media (min-width: 900px) and (orientation: landscape) {
+  .keep.is-unsaved {
+    display: grid;
+    grid-template-columns: auto minmax(16rem, 22rem);
+    grid-template-areas:
+      'pic card'
+      'pic actions';
+    justify-content: center;
+    align-items: center;
+    gap: 1rem 1.25rem;
+  }
+  .keep.is-unsaved .keep-result {
+    grid-area: pic;
+    width: min(52rem, calc(100vw - 30rem), calc((100dvh - 26rem) * 16 / 9));
+  }
+  .keep.is-unsaved .keep-unsaved {
+    grid-area: card;
+    align-self: end;
+    width: 100%;
+  }
+  .keep.is-unsaved .keep-actions {
+    grid-area: actions;
+    align-self: start;
+  }
 }

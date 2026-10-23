@@ -15,7 +15,16 @@ node e2e/fixtures/gen/preview.ts e2e/fixtures/out/hair-spill 30   # camera | GT 
 ```
 
 Other options: `--helper off,on,force,synth`, `--frames N`, `--size 960x540`,
-`--warmup 10`, `--cadence 2`, `--dump` (middle-frame matte + composite PNGs in
+`--warmup 10`, `--cadence 2`,
+`--seg landscape:pad,selfie:stretch` (segmenter model:input variants; `sloppy-<grow>-<jitter>:pad` feeds a
+GT-derived, grown + wobbling mask to stress the AI cutout's edge refinement), `--models <dir>` (serve
+candidate .tflite files not in public/), `--tune colorGF=1,gfRadius=8` (SEG_TUNING overrides),
+`--mode chroma` (force a path; on `webcam-beige` it reproduces the garbage-matte halo bug),
+`--flags unmix=0,helperTrust=0,mirrorEdges=0` (Compositor.setKeyerFlags: A/B a keyer feature in one build; also
+`unmixSrgb8=1` to score the SRGB8_ALPHA8 fallback, `unmixProj`, `unmixCap`, `unmixSpillKeep`, `choke` overrides;
+M2: `despeckle`, `holeFill`, `dsMinArea`, `dsMinHole`, `gfTemporal`, `gfCT`, `gfMatteT`, `gfGuard`, `robustKey`, `bkKL`, `bkDE`;
+M3: `flatten` (0-3), `flattenLod`, `flattenHelperDonors`, `projAlpha`, `projAlphaWide`, `projTaper`, `matte16`, `ratioGuard`),
+`--seg-timing` (ms per segment() call at 720p), `--timing-ids clean,webcam-beige`, `--dump` (middle-frame matte + composite PNGs in
 `results/<label>/`), `--headed`, `--port 5230` (never 5190, the preview server).
 
 ## How it works
@@ -45,7 +54,9 @@ Helper variants: `off` chroma only · `on` real MediaPipe Magic Helper every 2nd
 "auto" setting (core fill only after the shirt signal) · `force` helper "on" setting
 (core fill always) · `synth` helper "on" setting fed a deterministic GT-derived mask
 (256 px, blurred, one frame late) instead of MediaPipe: an upper bound for the helper
-path that does not depend on how MediaPipe sees cartoon people (it misses most of the
+path that does not depend on how MediaPipe sees cartoon people. `synth-lagN` feeds the same mask N frames late
+(a slow helper behind a moving kid; stresses Magic Helper trust). Chroma helper variants run `HelperTrustTracker`
+exactly as `useStage` does, on the fixture's frame clock (it misses most of the
 green-shirt torso, for example). The `classroom` scenario has no screen, so it always runs
 the AI cutout (segment) path with MediaPipe whatever the variant.
 
@@ -63,6 +74,14 @@ the AI cutout (segment) path with MediaPipe whatever the variant.
 | Flicker | mean \|α_t − α_{t−1}\| where the GT did not change, ×1e3 |
 | Spill | mean excess of the key channel over max(other two) in the composite beyond the GT composite's, in GT-opaque pixels next to the edge, ×1e3 |
 | Unmix ΔE | mean CIE76 ΔE of composite vs GT composite where 0 < g < 1 (does the soft edge carry the child's colour?) |
+| Colour ΔE | the colour part of Unmix ΔE alone: the keyer's edge colour (recovered from the composite where α ≥ 0.25) re-composited with the GT alpha vs the GT composite, so alpha errors don't count |
+| Islands | blobs per frame of α ≥ 0.5 (8-connected) containing no GT ≥ 0.5 pixel (tape / clip specks and other detached bits) |
+| Ghost | mean α ×1e3 where GT = 0 now but GT ≥ 0.5 in one of the last 3 frames (trail behind a moving arm) |
+| dtSSD | temporal coherence (Erofeev et al. 2015): √mean(((α_t − α_{t−1}) − (g_t − g_{t−1}))²) ×1e3 |
+
+The md table also shows the auto key's accuracy: ΔE00 of the frame-0 key and of the final drift-tracked key against the
+true screen colour (linear mean of frame-0 GT-background pixels in the top / side border bands), plus the robust
+border-key status (`ok`, `too-dark`, `border-covered`, `ambiguous`).
 
 The GT composite is blended in the same sRGB-byte space the stage blends in, so
 Unmix ΔE measures the keyer's α and colour, not the blend space.

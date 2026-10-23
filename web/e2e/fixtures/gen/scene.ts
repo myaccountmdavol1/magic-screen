@@ -9,6 +9,7 @@
 // generate.ts turns these into a camera frame: I = P + (1 - A) * B, then a camera
 // model (white balance, flicker, noise, sRGB, 4:2:0, optional DCT blocks).
 import { clamp01, rng, srgb, type Vec3 } from './color.ts'
+import { makeOffice, renderWebcamPerson } from './webcam.ts'
 
 // ---------- SDF primitives (pixel units) ----------
 
@@ -115,7 +116,7 @@ export function rasterLayers(layers: Layer[], W: number, P: Float32Array, A: Flo
 // ---------- person ----------
 
 export interface PersonOpts {
-  kind: 'kid' | 'teacher'
+  kind: 'kid' | 'teacher' | 'webcam'
   skin: Vec3
   hair: Vec3
   shirt: Vec3
@@ -132,6 +133,22 @@ export interface PersonOpts {
   sway: number
   glasses: boolean
   lanyard: boolean
+  /** body geometry overrides, fractions of frame height (close-ups) */
+  geom?: Partial<PersonGeom>
+}
+
+export interface PersonGeom {
+  headY: number
+  rx: number
+  ry: number
+  hairY: number
+  hairRx: number
+  hairRy: number
+  hairCut: number
+  neckTop: number
+  torsoTop: number
+  torsoHW: number
+  torsoR: number
 }
 
 export const KID: PersonOpts = {
@@ -202,13 +219,17 @@ export function makeStrands(o: PersonOpts, seed: number): Strand[] {
  * Returns the person's bbox (for shadows) — not needed by most callers.
  */
 export function renderPerson(o: PersonOpts, strands: Strand[], t: number, W: number, H: number, P: Float32Array, A: Float32Array) {
+  if (o.kind === 'webcam') return renderWebcamPerson(t, W, H, P, A)
   const u = H
   const teacher = o.kind === 'teacher'
   const cx = W * 0.5 + o.sway * u * Math.sin((2 * Math.PI * t) / 3.1)
   const bob = 0.004 * u * Math.sin((2 * Math.PI * t) / 1.7)
-  const g = teacher
-    ? { headY: 0.4, rx: 0.12, ry: 0.15, hairY: 0.355, hairRx: 0.135, hairRy: 0.13, hairCut: 0.37, neckTop: 0.5, torsoTop: 0.66, torsoHW: 0.32, torsoR: 0.15 }
-    : { headY: 0.34, rx: 0.105, ry: 0.13, hairY: 0.3, hairRx: 0.118, hairRy: 0.115, hairCut: 0.315, neckTop: 0.44, torsoTop: 0.56, torsoHW: 0.2, torsoR: 0.1 }
+  const g: PersonGeom = {
+    ...(teacher
+      ? { headY: 0.4, rx: 0.12, ry: 0.15, hairY: 0.355, hairRx: 0.135, hairRy: 0.13, hairCut: 0.37, neckTop: 0.5, torsoTop: 0.66, torsoHW: 0.32, torsoR: 0.15 }
+      : { headY: 0.34, rx: 0.105, ry: 0.13, hairY: 0.3, hairRx: 0.118, hairRy: 0.115, hairCut: 0.315, neckTop: 0.44, torsoTop: 0.56, torsoHW: 0.2, torsoR: 0.1 }),
+    ...o.geom,
+  }
   const hx = cx + (teacher ? 0.01 * u * Math.sin((2 * Math.PI * t) / 2.3) : 0)
   const hy = g.headY * u + bob
   const hrx = g.rx * u
@@ -448,6 +469,10 @@ export interface PlateOpts {
   wrinkles: number
   /** number of tape/clip specks */
   specks: number
+  /** extra specks cut by the frame edge (half on, half off the picture) */
+  edgeSpecks?: number
+  /** screen 'none' only: which room is behind the person (default classroom) */
+  room?: 'classroom' | 'office'
 }
 
 export const SCREEN_GREEN: Vec3 = srgb(55 / 255, 165 / 255, 85 / 255)
@@ -455,7 +480,7 @@ export const SCREEN_BLUE: Vec3 = srgb(35 / 255, 85 / 255, 190 / 255)
 
 /** Static backing plate (linear RGB, 3n). The cast shadow is applied per frame. */
 export function makePlate(o: PlateOpts, W: number, H: number, seed: number): Float32Array {
-  if (o.screen === 'none') return makeClassroom(W, H, seed)
+  if (o.screen === 'none') return o.room === 'office' ? makeOffice(W, H, seed) : makeClassroom(W, H, seed)
   const r = rng(seed)
   const base = o.screen === 'green' ? SCREEN_GREEN : SCREEN_BLUE
   const out = new Float32Array(W * H * 3)
@@ -495,10 +520,18 @@ export function makePlate(o: PlateOpts, W: number, H: number, seed: number): Flo
     }
   }
   // specks: tape strips (off-white) and clips (black/silver), fixed on the screen
-  for (let s = 0; s < o.specks; s++) {
+  const nEdge = o.edgeSpecks ?? 0
+  for (let s = 0; s < o.specks + nEdge; s++) {
     const tape = r() < 0.6
-    const cx = (0.04 + 0.92 * r()) * W
-    const cy = (r() < 0.5 ? 0.03 + 0.25 * r() : 0.03 + 0.94 * r()) * H
+    let cx = (0.04 + 0.92 * r()) * W
+    let cy = (r() < 0.5 ? 0.03 + 0.25 * r() : 0.03 + 0.94 * r()) * H
+    if (s >= o.specks) {
+      // straddle the left, right or top edge (the bottom is the kid's)
+      const side = (s - o.specks) % 3
+      if (side === 0) cx = 0
+      else if (side === 1) cx = W
+      else cy = 0
+    }
     const hw = (tape ? 0.006 + 0.01 * r() : 0.004 + 0.004 * r()) * H
     const hh = (tape ? 0.012 + 0.02 * r() : 0.006 + 0.006 * r()) * H
     const ang = (r() - 0.5) * 1.2

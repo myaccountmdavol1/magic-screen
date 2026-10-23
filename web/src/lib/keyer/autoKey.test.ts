@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RGB } from '../../types'
-import { autoKeyFromSamples, despill, keyAlpha, pickKeyColor, rgbToYCbCr } from './autoKey'
+import { autoKeyFromSamples, despill, keyAlpha, pickKeyColor, rgbToYCbCr, robustBorderKey, type BorderCell } from './autoKey'
+import { deltaE00, type Lab } from './labKey'
 
 const GREEN_KEY: RGB = [0.2, 0.75, 0.3] // store default
 const BLUE_KEY: RGB = [0.1, 0.3, 0.85]
@@ -226,5 +227,61 @@ describe('autoKeyFromSamples', () => {
   })
   it('returns null without a screen', () => {
     expect(autoKeyFromSamples([...SKIN, ...NEUTRALS])).toBeNull()
+  })
+})
+
+describe('robustBorderKey (item 6)', () => {
+  const GREEN: Lab = [60, -55, 40]
+  const cell = (lab: Lab, n = 40): BorderCell => ({ lab, n })
+  const greens = (k: number, jitter = 0.5) => Array.from({ length: k }, (_, i) => cell([GREEN[0] + jitter * Math.sin(i), GREEN[1] + jitter * Math.cos(i), GREEN[2]]))
+
+  it('24 green cells: ok, key within ΔE00 1', () => {
+    const r = robustBorderKey(greens(24), null)
+    expect(r.status).toBe('ok')
+    expect(deltaE00(r.key!, GREEN)).toBeLessThan(1)
+    expect(r.inliers).toHaveLength(24)
+  })
+
+  it('a teal shirt on 7 of 24 cells is outvoted, not averaged in', () => {
+    const teal: Lab = [58, -40, 2]
+    const r = robustBorderKey([...greens(17), ...Array.from({ length: 7 }, () => cell(teal))], null)
+    expect(r.status).toBe('ok')
+    expect(r.inliers).toHaveLength(17)
+    expect(deltaE00(r.key!, GREEN)).toBeLessThan(1)
+  })
+
+  it('18 cells covered (grey / skin, no chroma): border-covered keeps the previous key', () => {
+    const covered = Array.from({ length: 18 }, () => cell([50, 2, 3]))
+    const prev: Lab = [61, -54, 41]
+    const r = robustBorderKey([...greens(6), ...covered], prev)
+    expect(r.status).toBe('border-covered')
+    expect(r.key).toEqual(prev)
+  })
+
+  it('green, sage and teal thirds (no majority): ambiguous, previous key kept', () => {
+    const sage: Lab = [62, -15, 18]
+    const teal: Lab = [58, -40, 2]
+    const prev: Lab = [61, -54, 41]
+    const r = robustBorderKey([...greens(8), ...Array.from({ length: 8 }, () => cell(sage)), ...Array.from({ length: 8 }, () => cell(teal))], prev)
+    expect(r.status).toBe('ambiguous')
+    expect(r.key).toEqual(prev)
+  })
+
+  it('a dark screen still keys but asks for light', () => {
+    const r = robustBorderKey(Array.from({ length: 24 }, () => cell([20, -30, 22])), null)
+    expect(r.status).toBe('too-dark')
+    expect(r.key![0]).toBeCloseTo(20, 5)
+  })
+
+  it('a dim, washed-out screen (C just above MIN_KEY_C) is not "border-covered"', () => {
+    const r = robustBorderKey(Array.from({ length: 24 }, () => cell([45, -9, 6])), null)
+    expect(r.status).toBe('ok')
+  })
+
+  it('the dim side of an unevenly lit screen stays in (the key would remove it anyway)', () => {
+    const dim: Lab = [38, -40, 30] // same green in shade (darker, less chroma)
+    expect(deltaE00(dim, GREEN)).toBeGreaterThan(10)
+    const r = robustBorderKey([...greens(14), ...Array.from({ length: 10 }, () => cell(dim))], null)
+    expect(r.inliers).toHaveLength(24)
   })
 })

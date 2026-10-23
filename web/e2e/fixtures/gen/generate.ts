@@ -71,9 +71,10 @@ function sourceHash(): string {
 }
 
 function cameraGains(sc: Scenario, p: number): [number, number, number] {
-  if (!sc.awb) return [1, 1, 1]
+  const e = sc.exposure ?? 1
+  if (!sc.awb) return [e, e, e]
   const s = smoothstep(0.1, 0.8, p) * sc.awb
-  const ex = 1 - 0.12 * s
+  const ex = (1 - 0.12 * s) * e
   return [(1 + 0.14 * s) * ex, (1 + 0.02 * s) * ex, (1 - 0.12 * s) * ex]
 }
 

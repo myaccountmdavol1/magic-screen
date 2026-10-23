@@ -8,7 +8,7 @@ import { Button } from '../../components/Button'
 import { Icon } from '../../components/Icon'
 import { toast } from '../../components/Toast'
 import { fireConfetti } from '../../components/Confetti'
-import { saveToDevice } from '../../lib/recorder'
+import { requestPersistentStorage, saveToDevice } from '../../lib/recorder'
 import { saveCreation, newCreationId } from '../../lib/storage'
 import { playSound } from '../../lib/sound'
 import { speak } from '../../lib/voice'
@@ -21,11 +21,15 @@ interface Shown {
 }
 
 /**
- * Captures already celebrated + saved. Module-level (not a ref) because the child can
- * leave Keep via the stepper and come back with the same capture, which mounts a
- * fresh KeepStep; a per-instance ref would save a duplicate into the gallery.
+ * Gallery saves per capture. Module-level (not a ref) because the child can leave Keep
+ * via the stepper and come back with the same capture, which mounts a fresh KeepStep;
+ * a per-instance ref would save a duplicate into the gallery.
  */
-const celebrated = new WeakSet<Blob>()
+const saves = new WeakMap<Blob, Promise<void>>()
+/** Captures already celebrated (or already told "not saved"): StrictMode-safe, once each. */
+const announced = new WeakSet<Blob>()
+/** Captures the child already put into Photos / Files with Save. */
+const savedToDevice = new WeakSet<Blob>()
 
 async function persist(shown: Shown, thumbDataUrl: string) {
   await saveCreation(
@@ -41,6 +45,26 @@ async function persist(shown: Shown, thumbDataUrl: string) {
   )
 }
 
+/** Only messages written for people (e.g. "The iPad is full!") get through; never raw errors. */
+const FRIENDLY_SAVE_ERROR = /iPad is full|cannot save pictures/i
+
+/** Run `fn` now, or when the page is next visible (speech and confetti are lost while hidden). */
+function whenVisible(fn: () => void): () => void {
+  if (!document.hidden) {
+    fn()
+    return () => {}
+  }
+  const onVis = () => {
+    if (document.hidden) return
+    document.removeEventListener('visibilitychange', onVis)
+    fn()
+  }
+  document.addEventListener('visibilitychange', onVis)
+  return () => document.removeEventListener('visibilitychange', onVis)
+}
+
+type GalleryState = { status: 'saving' } | { status: 'saved' } | { status: 'failed'; reason: string | null }
+
 export default function KeepStep() {
   const capture = useApp((s) => s.capture)
   const goStep = useApp((s) => s.goStep)
@@ -49,6 +73,8 @@ export default function KeepStep() {
 
   const shown = useMemo(() => fromCapture(capture), [capture])
   const [saving, setSaving] = useState(false)
+  const [gallery, setGallery] = useState<GalleryState>({ status: 'saving' })
+  const [inPhotos, setInPhotos] = useState(false)
 
   // Create the blob URL inside the effect (not useMemo): StrictMode's simulated unmount
   // would otherwise revoke a memoized URL that the remount then keeps using.
@@ -63,14 +89,48 @@ export default function KeepStep() {
     return () => URL.revokeObjectURL(u)
   }, [shown])
 
-  // Celebrate + auto-save once per capture (also covers StrictMode's double effect).
+  const savedOnLeave = !!capture?.savedOnLeave
+
+  // Auto-save once per capture; celebrate only once it is really in My creations.
   useEffect(() => {
-    if (!capture || celebrated.has(capture.composite)) return
-    celebrated.add(capture.composite)
-    fireConfetti()
-    playSound('success')
-    speak('Wow! You made it!')
-    persist(fromCapture(capture)!, capture.thumbDataUrl).catch(() => toast("Couldn't keep it in the gallery"))
+    if (!capture) return
+    const blob = capture.composite
+    setInPhotos(savedToDevice.has(blob))
+    let job = saves.get(blob)
+    if (!job) {
+      // First save on this device: ask the browser not to evict the gallery.
+      void requestPersistentStorage()
+      job = persist(fromCapture(capture)!, capture.thumbDataUrl)
+      saves.set(blob, job)
+    }
+    let cancelled = false
+    let stopWaiting = () => {}
+    setGallery({ status: 'saving' })
+    job.then(
+      () => {
+        if (cancelled) return
+        setGallery({ status: 'saved' })
+        if (announced.has(blob)) return
+        announced.add(blob)
+        stopWaiting = whenVisible(() => {
+          fireConfetti()
+          playSound('success')
+          // Came back to the app after it saved the movie: say so out loud now.
+          if (capture.savedOnLeave) speak('We saved your movie!')
+        })
+      },
+      (err: unknown) => {
+        if (cancelled) return
+        // No confetti: the child must not think it is kept when it isn't.
+        const msg = err instanceof Error ? err.message : ''
+        setGallery({ status: 'failed', reason: FRIENDLY_SAVE_ERROR.test(msg) ? msg : null })
+        announced.add(blob)
+      },
+    )
+    return () => {
+      cancelled = true
+      stopWaiting()
+    }
   }, [capture])
 
   const onSave = async () => {
@@ -80,6 +140,8 @@ export default function KeepStep() {
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
       const res = await saveToDevice(shown.blob, `magic-screen-${stamp}`)
       if (res !== 'cancelled') {
+        savedToDevice.add(shown.blob)
+        setInPhotos(true)
         playSound('success')
         toast('Saved!')
         speak('Saved!')
@@ -106,15 +168,22 @@ export default function KeepStep() {
     )
   }
 
+  const unsaved = gallery.status === 'failed' && !inPhotos
+  const spoken = unsaved
+    ? 'Not saved yet. Tap Save to put it in Photos.'
+    : savedOnLeave
+      ? 'We saved your movie!'
+      : 'Wow! You made it!'
+
   return (
     <StepShell
-      title="You did it!"
+      title={savedOnLeave ? 'We saved your movie!' : 'You did it!'}
       subtitle={shown.kind === 'video' ? 'Watch your movie!' : 'Look at your picture!'}
-      speak="Wow! You made it!"
+      speak={spoken}
       back={{ label: 'Try again', onClick: () => goStep('action') }}
       next={{ label: 'Make another', onClick: newCreation, variant: 'success' }}
     >
-      <div className="keep">
+      <div className={`keep${unsaved ? ' is-unsaved' : ''}`}>
         <div className="keep-result">
           {!url ? null : shown.kind === 'photo' ? (
             <img src={url} alt="Your picture" />
@@ -123,8 +192,28 @@ export default function KeepStep() {
           )}
         </div>
 
+        {unsaved && (
+          <div className="keep-unsaved" role="alert">
+            <span className="keep-unsaved-icon" aria-hidden="true">
+              <Icon name="save" size={30} />
+            </span>
+            <span className="keep-unsaved-text">
+              <strong>Not saved in My creations.</strong>
+              <span>Tap Save to put it in Photos now.</span>
+              {gallery.reason && <span className="keep-unsaved-reason">{gallery.reason}</span>}
+            </span>
+          </div>
+        )}
+
         <div className="keep-actions">
-          <Button variant="primary" size="xl" icon="save" onClick={onSave} disabled={saving}>
+          <Button
+            variant="primary"
+            size="xl"
+            icon="save"
+            className={unsaved ? 'keep-save-pulse' : undefined}
+            onClick={onSave}
+            disabled={saving}
+          >
             Save
           </Button>
           <Button variant="ghost" size="lg" icon="home" onClick={() => goScreen('home')}>

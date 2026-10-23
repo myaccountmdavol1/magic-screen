@@ -3,7 +3,19 @@
 // metric itself is the Lab "keyD" in labKey.ts, baked into a LUT (keyLut.ts).
 // keyAlpha/keyAlphaFast (YCbCr) stay for API compatibility and quick checks.
 import type { RGB } from '../../types'
-import { autoThresholds, averageLinear, keyDistRgb, keyLabParams, type AutoThresholds } from './labKey'
+import {
+  MIN_KEY_C,
+  autoThresholds,
+  averageLinear,
+  deltaE00,
+  keyDistLab,
+  keyDistRgb,
+  keyLabFromLab,
+  keyLabParams,
+  median,
+  type AutoThresholds,
+  type Lab,
+} from './labKey'
 
 /**
  * Tuning constants shared with the shader.
@@ -122,8 +134,10 @@ export const SPILL_EDGE = 1.0
  * - At semi-transparent edges the limit moves to their average and the strength
  *   is boosted, because that is where the screen's glow sits.
  * - The removed amount's luma is added back as neutral grey so skin doesn't darken.
+ * - `edgeBoost` (default SPILL_EDGE) is lowered by the GPU path where the edge
+ *   colour was already unmixed (UNMIX_TUNING.spillKeep).
  */
-export function despill(px: RGB, key: RGB, strength: number, alpha = 1): RGB {
+export function despill(px: RGB, key: RGB, strength: number, alpha = 1, edgeBoost = SPILL_EDGE): RGB {
   const out: RGB = [px[0], px[1], px[2]]
   if (strength <= 0) return out
   const ch = dominantChannel(key)
@@ -131,7 +145,7 @@ export function despill(px: RGB, key: RGB, strength: number, alpha = 1): RGB {
   const o2 = px[(ch + 2) % 3]
   const edge = 1 - Math.abs(2 * Math.min(1, Math.max(0, alpha)) - 1)
   const limit = Math.max(o1, o2) * (1 - edge) + ((o1 + o2) / 2) * edge
-  const k = Math.min(1, Math.max(0, strength * (1 + SPILL_EDGE * edge)))
+  const k = Math.min(1, Math.max(0, strength * (1 + edgeBoost * edge)))
   const s = Math.max(px[ch] - limit, 0) * k
   if (s <= 0) return out
   out[ch] -= s
@@ -157,6 +171,17 @@ interface Cluster {
   samples: RGB[]
 }
 
+/** A sample that could be backing: bright and saturated enough, green-to-blue hue. */
+export function isScreenLike(c: RGB): boolean {
+  const max = Math.max(c[0], c[1], c[2])
+  const min = Math.min(c[0], c[1], c[2])
+  const chroma = max - min
+  if (max < 0.12 || chroma < 0.12 || chroma / max < 0.3) return false
+  const h = rgbToHue(c[0], c[1], c[2])
+  // 70..270 deg spans yellow-green through green, cyan and blue.
+  return h >= 70 && h <= 270
+}
+
 /**
  * Screen-like samples of the densest green/blue hue cluster, or null.
  * Rejects dull/gray/dark samples and non green-blue hues (skin, wood, red shirts).
@@ -165,14 +190,8 @@ function screenCluster(samples: RGB[]): Cluster | null {
   if (samples.length === 0) return null
   const screenLike: { c: RGB; h: number }[] = []
   for (const c of samples) {
-    const max = Math.max(c[0], c[1], c[2])
-    const min = Math.min(c[0], c[1], c[2])
-    const chroma = max - min
-    if (max < 0.12 || chroma < 0.12 || chroma / max < 0.3) continue
-    const h = rgbToHue(c[0], c[1], c[2])
-    // 70..270 deg spans yellow-green through green, cyan and blue.
-    if (h < 70 || h > 270) continue
-    screenLike.push({ c, h })
+    if (!isScreenLike(c)) continue
+    screenLike.push({ c, h: rgbToHue(c[0], c[1], c[2]) })
   }
   const minCount = Math.max(3, Math.ceil(samples.length * 0.15))
   if (screenLike.length < minCount) return null
@@ -209,6 +228,20 @@ export function pickKeyColor(samples: RGB[]): RGB | null {
 
 const luma = (c: RGB) => LUMA[0] * c[0] + LUMA[1] * c[1] + LUMA[2] * c[2]
 
+/**
+ * Key colour + thresholds from samples already known to be screen (e.g. the inlier
+ * cells of robustBorderKey): luma-trimmed linear mean, thresholds from their keyD.
+ */
+export function autoKeyFromScreen(screen: RGB[]): AutoKeyResult | null {
+  if (screen.length < 3) return null
+  const byLuma = [...screen].sort((a, b) => luma(a) - luma(b))
+  const trim = Math.floor(byLuma.length * 0.1)
+  const color = averageLinear(byLuma.slice(trim, byLuma.length - trim))
+  if (!color) return null
+  const key = keyLabParams(color)
+  return { color, ...autoThresholds(screen.map((c) => keyDistRgb(c, key))) }
+}
+
 export interface AutoKeyResult extends AutoThresholds {
   color: RGB
 }
@@ -226,4 +259,81 @@ export function autoKeyFromSamples(samples: RGB[]): AutoKeyResult | null {
   const key = keyLabParams(color)
   const t = autoThresholds(cluster.samples.map((c) => keyDistRgb(c, key)))
   return { color, ...t }
+}
+
+/** Robust border key (plan item 6) tuning. */
+export const BORDER_KEY = {
+  /** cells around the top and side borders (10 across the top, 7 down each side) */
+  topCells: 10,
+  sideCells: 7,
+  /** fewer chromatic cells than this = the border is covered (kid close to the iPad) */
+  minCells: 8,
+  /** a cell further than this (CIEDE2000) from the median is not the screen */
+  inlierDE: 10,
+  /** lightness weight of that distance (kL; > 1 = lightness counts less) */
+  inlierKL: 1,
+  /**
+   * ...or a cell the median's own key would remove anyway (keyD, shadow-invariant)
+   * is screen too: a dim, colour-shifted side of an unevenly lit screen. Without
+   * this, uneven-light lost its dim side (key ΔE 0.07 -> 1.13, SAD +2 %); a kL > 1
+   * instead let a teal shirt in (close-up key ΔE 1.6, the shirt keyed out).
+   */
+  inlierKeyD: 6,
+  /** inliers needed, as a share of the chromatic cells */
+  minInlierShare: 0.6,
+  /** median lightness below this: the screen needs more light */
+  darkL: 25,
+  /** cells darker than this carry no usable hue (sensor noise) */
+  minL: 12,
+}
+
+export type BorderKeyStatus = 'ok' | 'too-dark' | 'border-covered' | 'ambiguous'
+
+export interface BorderCell {
+  /** CIELAB of the cell's mean colour (averaged in linear light) */
+  lab: Lab
+  /** samples in the cell */
+  n: number
+}
+
+export interface BorderKeyResult {
+  /** key colour in Lab, or null (keep whatever key is in use) */
+  key: Lab | null
+  status: BorderKeyStatus
+  /** indices of the cells the key was taken from (empty unless ok / too-dark) */
+  inliers: number[]
+}
+
+/**
+ * Key colour from border cells, voted by position: a shirt or a hand covering some
+ * cells is outvoted instead of averaged in. Chromatic cells (C above
+ * max(MIN_KEY_C, half the previous key's chroma), so a dim, washed-out screen still
+ * counts) give a per-channel median; cells within inlierDE of it are the screen.
+ * - border-covered: too few chromatic cells (keep the previous key, retry later)
+ * - ambiguous: no clear majority (previous key, else the median)
+ * - too-dark: a clear key, but the screen is underlit (ask for more light)
+ * Idea from CorridorKey's screen-colour guard (coverage / dominance tests on the
+ * first frame), rebuilt as a spatial vote; no code shared.
+ */
+export function robustBorderKey(
+  cells: readonly BorderCell[],
+  prev: Lab | null,
+  opts: { kL?: number; inlierDE?: number } = {},
+): BorderKeyResult {
+  const kL = opts.kL ?? BORDER_KEY.inlierKL
+  const inlierDE = opts.inlierDE ?? BORDER_KEY.inlierDE
+  const cPrev = prev ? Math.hypot(prev[1], prev[2]) : 0
+  const cut = Math.max(MIN_KEY_C, 0.5 * cPrev)
+  const cand: number[] = []
+  cells.forEach((c, i) => {
+    if (c.n > 0 && Math.hypot(c.lab[1], c.lab[2]) > cut && c.lab[0] > BORDER_KEY.minL) cand.push(i)
+  })
+  if (cand.length < BORDER_KEY.minCells) return { key: prev, status: 'border-covered', inliers: [] }
+  const med: Lab = [0, 1, 2].map((k) => median(cand.map((i) => cells[i].lab[k]))) as Lab
+  const medKey = keyLabFromLab(med)
+  const inl = cand.filter((i) => deltaE00(cells[i].lab, med, kL) < inlierDE || keyDistLab(cells[i].lab, medKey) < BORDER_KEY.inlierKeyD)
+  if (inl.length < BORDER_KEY.minInlierShare * cand.length) return { key: prev ?? med, status: 'ambiguous', inliers: [] }
+  const W = inl.reduce((t, i) => t + cells[i].n, 0)
+  const key = [0, 1, 2].map((k) => inl.reduce((t, i) => t + cells[i].lab[k] * cells[i].n, 0) / W) as Lab
+  return { key, status: med[0] < BORDER_KEY.darkL ? 'too-dark' : 'ok', inliers: inl }
 }

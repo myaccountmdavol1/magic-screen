@@ -1,9 +1,18 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { DEFAULT_SETTINGS, useApp } from '../state/store'
 import { Compositor } from '../lib/keyer/Compositor'
-import { deleteAllCreations, listCreations } from '../lib/storage'
+import {
+  daysLeft,
+  deleteAllCreations,
+  deleteCreation,
+  deleteCreationForever,
+  listCreations,
+  listDeletedCreations,
+  restoreCreation,
+  TRASH_DAYS,
+} from '../lib/storage'
 import { playSound } from '../lib/sound'
-import type { RGB, Settings } from '../types'
+import type { Creation, RGB, Settings } from '../types'
 import { Panel } from '../components/Panel'
 import { Button } from '../components/Button'
 import { Icon, type IconName } from '../components/Icon'
@@ -195,6 +204,7 @@ function Slider({
   step = 0.01,
   onChange,
   disabled,
+  valueText,
 }: {
   label: string
   hint?: string
@@ -204,6 +214,8 @@ function Slider({
   step?: number
   onChange: (v: number) => void
   disabled?: boolean
+  /** shown instead of the 0–100% position (e.g. "Normal" for a centred slider) */
+  valueText?: string
 }) {
   const id = useId()
   const pct = Math.round(((value - min) / (max - min)) * 100)
@@ -213,7 +225,7 @@ function Slider({
         <label className="t-label" htmlFor={id}>
           {label}
         </label>
-        <span className="t-value">{pct}%</span>
+        <span className="t-value">{valueText ?? `${pct}%`}</span>
       </div>
       {hint && <span className="t-hint">{hint}</span>}
       <input
@@ -252,23 +264,29 @@ function Licenses() {
   )
 }
 
-function KeyPreview({ settings }: { settings: Settings }) {
+function KeyPreview({ settings, check = false }: { settings: Settings; check?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const compRef = useRef<Compositor | null>(null)
   const [failed, setFailed] = useState(false)
+  const pendingDestroy = useRef(0)
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    try {
-      const W = 480
-      const H = 270
-      const comp = new Compositor(canvas, { width: W, height: H })
-      comp.setBackground(makeSampleBackground(W, H))
-      comp.setForeground(makeSampleForeground(W, H))
-      compRef.current = comp
-    } catch {
-      setFailed(true)
+    // StrictMode unmounts and remounts right away: keep the same Compositor then, and
+    // only destroy it (releasing its WebGL context) once the preview is really gone.
+    window.clearTimeout(pendingDestroy.current)
+    if (!compRef.current) {
+      try {
+        const W = 480
+        const H = 270
+        const comp = new Compositor(canvas, { width: W, height: H })
+        comp.setBackground(makeSampleBackground(W, H))
+        comp.setForeground(makeSampleForeground(W, H))
+        compRef.current = comp
+      } catch {
+        setFailed(true)
+      }
     }
     // The preview only draws when a slider moves, so redraw once the GPU context
     // comes back (the Compositor's own restore listener was registered first).
@@ -276,8 +294,10 @@ function KeyPreview({ settings }: { settings: Settings }) {
     canvas.addEventListener('webglcontextrestored', onRestored)
     return () => {
       canvas.removeEventListener('webglcontextrestored', onRestored)
-      compRef.current?.destroy()
-      compRef.current = null
+      pendingDestroy.current = window.setTimeout(() => {
+        compRef.current?.destroy({ releaseContext: true })
+        compRef.current = null
+      }, 0)
     }
   }, [])
 
@@ -286,8 +306,10 @@ function KeyPreview({ settings }: { settings: Settings }) {
     const comp = compRef.current
     if (!comp) return
     comp.setKey({ mode: 'chroma', color, similarity, smoothness, spill })
+    // "Check the edges": cutout over a grey checker + magenta band (keyer P2 item 11).
+    comp.setCheckerboard(check)
     comp.render()
-  }, [color, similarity, smoothness, spill])
+  }, [color, similarity, smoothness, spill, check])
 
   return (
     <div className="key-preview">
@@ -298,12 +320,19 @@ function KeyPreview({ settings }: { settings: Settings }) {
   )
 }
 
+/** The outline slider runs -1 (looser) .. +1 (tighter); 0 is the normal edge. */
+function outlineText(v: number): string {
+  if (Math.abs(v) < 0.01) return 'Normal'
+  return `${v > 0 ? 'Tighter' : 'Looser'} ${Math.round(Math.abs(v) * 100)}%`
+}
+
 function GreenScreenCard() {
   const settings = useApp((s) => s.settings)
   const update = useApp((s) => s.updateSettings)
   const setKey = (patch: Partial<Settings['key']>) => update({ key: { ...settings.key, ...patch } })
   // Green screen settings apply in Auto too (whenever a screen is found).
   const chroma = settings.greenScreenMode !== 'segment'
+  const [checkEdges, setCheckEdges] = useState(false)
 
   return (
     <Card icon="sparkle" title="Green screen" tone="green">
@@ -324,8 +353,9 @@ function GreenScreenCard() {
       )}
       <Slider
         label="Outline"
-        hint="Slide right for a tighter edge (trims more), left for a looser one. Kids can nudge it too."
+        hint="Slide right for a tighter edge (trims more), left for a looser one. Grown-up fix on the Me step nudges it too."
         value={settings.outline ?? 0}
+        valueText={outlineText(settings.outline ?? 0)}
         min={-1}
         max={1}
         step={0.05}
@@ -357,7 +387,7 @@ function GreenScreenCard() {
       )}
 
       <div className={`key-grid${chroma ? '' : ' dimmed'}`}>
-        <KeyPreview settings={settings} />
+        <KeyPreview settings={settings} check={checkEdges} />
         <div className="key-controls">
           <div className="t-row">
             <span className="t-row-text">
@@ -406,50 +436,152 @@ function GreenScreenCard() {
             disabled={!chroma}
             onChange={(spill) => setKey({ spill })}
           />
+          <Toggle
+            label="Check the edges"
+            hint="Shows the cutout over a grey checkerboard with a pink stripe, so holes and green edges stand out."
+            checked={checkEdges}
+            onChange={setCheckEdges}
+          />
         </div>
       </div>
     </Card>
   )
 }
 
+function creationLabel(c: Creation) {
+  const what = c.kind === 'video' ? 'Video' : 'Photo'
+  try {
+    return `${what} · ${new Date(c.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+  } catch {
+    return what
+  }
+}
+
+/**
+ * Delete lives here, not on the kid View screen. Deleting moves a creation to
+ * "Recently deleted" for 7 days (purged on app start after that) so a slip can be undone.
+ */
 function CreationsCard() {
-  const [count, setCount] = useState<number | null>(null)
+  const [live, setLive] = useState<Creation[] | null>(null)
+  const [trash, setTrash] = useState<Creation[]>([])
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
 
+  const refresh = () =>
+    Promise.all([listCreations(), listDeletedCreations()])
+      .then(([l, t]) => {
+        setLive(l)
+        setTrash(t)
+      })
+      .catch(() => {
+        setLive((prev) => prev ?? [])
+      })
+
   useEffect(() => {
-    listCreations()
-      .then((l) => setCount(l.length))
-      .catch(() => setCount(0))
+    void refresh()
   }, [])
 
-  const deleteAll = async () => {
-    setConfirm(false)
+  const run = async (fn: () => Promise<void>, ok: string, fail: string) => {
     setBusy(true)
     try {
-      await deleteAllCreations()
-      setCount(0)
-      toast('All creations deleted')
+      await fn()
+      toast(ok)
     } catch {
-      toast('Some creations could not be deleted')
-      listCreations().then((l) => setCount(l.length)).catch(() => {})
+      toast(fail)
     } finally {
+      await refresh()
       setBusy(false)
     }
   }
+
+  const deleteAll = async () => {
+    setConfirm(false)
+    playSound('pop')
+    await run(deleteAllCreations, 'All creations deleted', 'Some creations could not be deleted')
+  }
+
+  const count = live?.length ?? null
 
   return (
     <Card icon="image" title="Creations" tone="pink">
       <p className="t-note">
         {count === null ? 'Counting…' : count === 1 ? '1 creation saved on this device.' : `${count} creations saved on this device.`}
       </p>
-      <Button variant="danger" icon="trash" disabled={!count || busy} onClick={() => setConfirm(true)}>
+      {!!live?.length && (
+        <ul className="t-creations" aria-label="Saved creations">
+          {live.map((c) => (
+            <li key={c.id} className="t-creation">
+              <img src={c.thumbDataUrl} alt="" className="t-creation-thumb" draggable={false} />
+              <span className="t-creation-label">{creationLabel(c)}</span>
+              <Button
+                variant="secondary"
+                icon="trash"
+                disabled={busy}
+                aria-label={`Delete ${creationLabel(c)}`}
+                onClick={() => {
+                  playSound('pop')
+                  void run(() => deleteCreation(c.id), 'Moved to Recently deleted', 'Could not delete it')
+                }}
+              >
+                Delete
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* An empty bin gets no heading of its own: right above "Delete all" it read as part of it. */}
+      {trash.length === 0 ? (
+        !!live?.length && (
+          <p className="t-hint t-hint-row">
+            Deleted creations wait in Recently deleted for {TRASH_DAYS} days, so you can bring them back. They still use
+            space until then.
+          </p>
+        )
+      ) : (
+        <>
+        <h3 className="t-subtitle">Recently deleted</h3>
+        <ul className="t-creations" aria-label="Recently deleted">
+          {trash.map((c) => (
+            <li key={c.id} className="t-creation t-creation-deleted">
+              <img src={c.thumbDataUrl} alt="" className="t-creation-thumb" draggable={false} />
+              <span className="t-creation-label">
+                {creationLabel(c)}
+                <span className="t-hint">{daysLeft(c) === 1 ? '1 day left' : `${daysLeft(c)} days left`}</span>
+              </span>
+              <span className="t-creation-actions">
+                <Button
+                  variant="success"
+                  icon="refresh"
+                  disabled={busy}
+                  aria-label={`Restore ${creationLabel(c)}`}
+                  onClick={() => void run(() => restoreCreation(c.id), 'Restored!', 'Could not restore it')}
+                >
+                  Restore
+                </Button>
+                <Button
+                  variant="ghost"
+                  icon="close"
+                  disabled={busy}
+                  aria-label={`Delete ${creationLabel(c)} now`}
+                  onClick={() => void run(() => deleteCreationForever(c.id), 'Deleted for good', 'Could not delete it')}
+                >
+                  Delete now
+                </Button>
+              </span>
+            </li>
+          ))}
+        </ul>
+        </>
+      )}
+
+      <Button variant="danger" icon="trash" disabled={(!count && !trash.length) || busy} onClick={() => setConfirm(true)}>
         Delete all creations
       </Button>
       <ConfirmDialog
         open={confirm}
         title="Delete everything?"
-        message="All photos and videos on this device will be gone for good."
+        message="All photos and videos on this device, including Recently deleted, will be gone for good."
         confirmLabel="Delete all"
         onConfirm={deleteAll}
         onCancel={() => setConfirm(false)}
@@ -465,7 +597,7 @@ const TIPS: { icon: IconName; title: string; text: string }[] = [
   { icon: 'photo', title: 'Fill the frame with green', text: 'Make the screen bigger than the camera view, so no wall or floor shows at the edges.' },
   { icon: 'camera', title: 'Use the back camera on a tripod', text: 'The back camera is sharper. A tripod or stand keeps the picture steady so the key stays clean.' },
   { icon: 'image', title: 'Matte, smooth backdrop', text: 'Use a bright, non-shiny green: a plastic tablecloth, fabric or painted board. Smooth out wrinkles.' },
-  { icon: 'finger', title: 'Magic finger', text: 'If the cutout looks patchy, tap "Tap the green" on the Me step, then touch the green behind the child.' },
+  { icon: 'finger', title: 'Magic finger', text: 'If the cutout looks patchy, press and hold the small gear in the corner of the picture on the Me step for 3 seconds to open Grown-up fix, tap "Tap the green", then touch the green behind the child.' },
   { icon: 'refresh', title: 'Experiment', text: 'Try different distances between camera, child and screen, and adjust Similarity above until edges look clean.' },
 ]
 
@@ -505,7 +637,11 @@ export default function Teacher() {
               { value: 'user', label: 'Front (selfie)' },
               { value: 'environment', label: 'Back' },
             ]}
-            onChange={(facing) => update({ facing })}
+            onChange={(facing) => {
+              update({ facing })
+              // A grown-up Flip on the Me step only lasts the session; the new default wins right away.
+              useApp.getState().setSessionFacing(null)
+            }}
           />
           <Toggle
             label="Mirror the front camera"
@@ -536,6 +672,12 @@ export default function Teacher() {
               { value: 5, label: '5' },
             ]}
             onChange={(countdownSec) => update({ countdownSec })}
+          />
+          <Toggle
+            label="Record sound"
+            hint="Videos include the microphone. Off: videos are silent and the iPad never asks for the mic."
+            checked={settings.recordSound ?? true}
+            onChange={(recordSound) => update({ recordSound })}
           />
         </Card>
 

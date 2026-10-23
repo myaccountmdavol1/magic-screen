@@ -39,12 +39,56 @@ function db(): Promise<IDBPDatabase<MagicDB>> {
       terminated() {
         dbPromise = null
       },
-    }).catch((err) => {
-      dbPromise = null
-      throw friendly(err)
     })
+      .then((d) => {
+        // App start: empty the "Recently deleted" bin of anything older than 7 days.
+        if (!purgedThisLoad) {
+          purgedThisLoad = true
+          void purgeExpired(d).catch(() => {})
+        }
+        return d
+      })
+      .catch((err) => {
+        dbPromise = null
+        throw friendly(err)
+      })
   }
   return dbPromise
+}
+
+/** How long a deleted creation can still be restored from Teacher → Recently deleted. */
+export const TRASH_DAYS = 7
+const TRASH_MS = TRASH_DAYS * 24 * 60 * 60 * 1000
+let purgedThisLoad = false
+
+/** True once a soft-deleted creation has been in the bin longer than TRASH_DAYS. */
+export function isExpired(c: Pick<Creation, 'deletedAt'>, now = Date.now()): boolean {
+  return c.deletedAt != null && now - c.deletedAt > TRASH_MS
+}
+
+/** Days left before a binned creation is gone for good (at least 1 while it is still listed). */
+export function daysLeft(c: Pick<Creation, 'deletedAt'>, now = Date.now()): number {
+  if (c.deletedAt == null) return TRASH_DAYS
+  return Math.max(1, Math.ceil((c.deletedAt + TRASH_MS - now) / (24 * 60 * 60 * 1000)))
+}
+
+/** Split a gallery into live creations and the bin (each newest first by its own clock). */
+export function splitTrash(all: Creation[]): { live: Creation[]; trash: Creation[] } {
+  const live = all.filter((c) => c.deletedAt == null).sort((a, b) => b.createdAt - a.createdAt)
+  const trash = all.filter((c) => c.deletedAt != null).sort((a, b) => b.deletedAt! - a.deletedAt!)
+  return { live, trash }
+}
+
+async function purgeExpired(d: IDBPDatabase<MagicDB>, now = Date.now()): Promise<number> {
+  const all = await d.getAll('creations')
+  const expired = all.filter((c) => isExpired(c, now))
+  if (!expired.length) return 0
+  const tx = d.transaction(['creations', 'media'], 'readwrite')
+  await Promise.all([
+    ...expired.flatMap((c) => [tx.objectStore('creations').delete(c.id), tx.objectStore('media').delete(c.id)]),
+    tx.done,
+  ])
+  return expired.length
 }
 
 function isQuotaError(err: unknown): boolean {
@@ -76,33 +120,93 @@ function newId(prefix: string): string {
   return `${prefix}_${rand}`
 }
 
+let pendingSaves = 0
+/** A gallery save is still being written (main.tsx must not reload for an app update now). */
+export function hasPendingSaves(): boolean {
+  return pendingSaves > 0
+}
+
 /** Store metadata + media atomically, so the gallery never shows a creation with no blob. */
 export function saveCreation(c: Creation, blob: Blob): Promise<void> {
+  pendingSaves++
   return guard(async () => {
     const d = await db()
     const tx = d.transaction(['creations', 'media'], 'readwrite')
-    await Promise.all([tx.objectStore('creations').put(c), tx.objectStore('media').put(blob, c.id), tx.done])
+    const reqs: Promise<unknown>[] = []
+    try {
+      // Media first: if it fails (even synchronously), no metadata row is left behind.
+      reqs.push(tx.objectStore('media').put(blob, c.id))
+      reqs.push(tx.objectStore('creations').put(c))
+      await Promise.all([...reqs, tx.done])
+    } catch (err) {
+      // A put that throws (e.g. QuotaExceededError) does not abort the transaction by
+      // itself, so the other row would commit: a gallery tile with no picture.
+      for (const p of reqs) p.catch(() => {})
+      tx.done.catch(() => {})
+      try {
+        tx.abort()
+      } catch {
+        /* already finished */
+      }
+      throw err
+    }
+  }).finally(() => {
+    pendingSaves--
   })
 }
 
-/** Newest first. */
+/** Newest first. Leaves out anything in the Recently deleted bin. */
 export function listCreations(): Promise<Creation[]> {
+  return guard(async () => splitTrash(await (await db()).getAll('creations')).live)
+}
+
+/** The Recently deleted bin (Teacher only), most recently deleted first. Expired items are left out. */
+export function listDeletedCreations(): Promise<Creation[]> {
   return guard(async () => {
-    const d = await db()
-    const all = await d.getAllFromIndex('creations', 'createdAt')
-    return all.reverse()
+    const now = Date.now()
+    return splitTrash(await (await db()).getAll('creations')).trash.filter((c) => !isExpired(c, now))
   })
 }
 
+/** A live creation; binned ones read as missing so a stale View link can't show them. */
 export function getCreation(id: string): Promise<Creation | undefined> {
-  return guard(async () => (await db()).get('creations', id))
+  return guard(async () => {
+    const c = await (await db()).get('creations', id)
+    return c && c.deletedAt == null ? c : undefined
+  })
 }
 
 export function getCreationBlob(id: string): Promise<Blob | undefined> {
   return guard(async () => (await db()).get('media', id))
 }
 
-export function deleteCreation(id: string): Promise<void> {
+/** Move a creation to the Recently deleted bin (restorable for TRASH_DAYS). */
+export function deleteCreation(id: string, now = Date.now()): Promise<void> {
+  return setDeletedAt(id, now)
+}
+
+/** Take a creation back out of the bin. */
+export function restoreCreation(id: string): Promise<void> {
+  return setDeletedAt(id, undefined)
+}
+
+function setDeletedAt(id: string, deletedAt: number | undefined): Promise<void> {
+  return guard(async () => {
+    const d = await db()
+    const tx = d.transaction('creations', 'readwrite')
+    const c = await tx.store.get(id)
+    if (c) {
+      const next: Creation = { ...c }
+      if (deletedAt == null) delete next.deletedAt
+      else next.deletedAt = deletedAt
+      await tx.store.put(next)
+    }
+    await tx.done
+  })
+}
+
+/** Remove a creation and its media right now (Teacher → Recently deleted → Delete now). */
+export function deleteCreationForever(id: string): Promise<void> {
   return guard(async () => {
     const d = await db()
     const tx = d.transaction(['creations', 'media'], 'readwrite')

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fileNameFor, pickVideoMime, saveToDevice } from './recorder'
+import { fileNameFor, pickVideoMime, saveToDevice, startRecording } from './recorder'
 
 function stubMediaRecorder(supported: string[]) {
   vi.stubGlobal('MediaRecorder', { isTypeSupported: (m: string) => supported.includes(m) })
@@ -72,5 +72,76 @@ describe('saveToDevice', () => {
       URL.createObjectURL = orig.create
       URL.revokeObjectURL = orig.revoke
     }
+  })
+})
+
+describe('requestPersistentStorage', () => {
+  it('asks persist() once per session and never throws', async () => {
+    const { requestPersistentStorage, resetPersistRequestForTests } = await import('./recorder')
+    resetPersistRequestForTests()
+    const persist = vi.fn(() => Promise.resolve(true))
+    vi.stubGlobal('navigator', { ...navigator, storage: { persisted: () => Promise.resolve(false), persist } })
+    await expect(requestPersistentStorage()).resolves.toBe(true)
+    await expect(requestPersistentStorage()).resolves.toBe(false)
+    expect(persist).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips the prompt when storage is already persistent, and survives a missing API', async () => {
+    const { requestPersistentStorage, resetPersistRequestForTests } = await import('./recorder')
+    resetPersistRequestForTests()
+    const persist = vi.fn(() => Promise.resolve(true))
+    vi.stubGlobal('navigator', { ...navigator, storage: { persisted: () => Promise.resolve(true), persist } })
+    await expect(requestPersistentStorage()).resolves.toBe(true)
+    expect(persist).not.toHaveBeenCalled()
+    resetPersistRequestForTests()
+    vi.stubGlobal('navigator', { ...navigator, storage: { persist: () => Promise.reject(new Error('nope')) } })
+    await expect(requestPersistentStorage()).resolves.toBe(false)
+  })
+})
+
+describe('startRecording', () => {
+  /** A MediaRecorder that hands back `chunks` when stopped. */
+  function stubRecorder(chunks: Blob[]) {
+    class FakeRecorder extends EventTarget {
+      static isTypeSupported = () => false
+      state: RecordingState = 'inactive'
+      mimeType = 'video/webm'
+      ondataavailable: ((e: { data: Blob }) => void) | null = null
+      onstop: (() => void) | null = null
+      onerror: (() => void) | null = null
+      start() {
+        this.state = 'recording'
+        this.dispatchEvent(new Event('start'))
+      }
+      stop() {
+        this.state = 'inactive'
+        for (const data of chunks) this.ondataavailable?.({ data })
+        this.onstop?.()
+      }
+    }
+    vi.stubGlobal('MediaRecorder', FakeRecorder)
+    vi.stubGlobal(
+      'MediaStream',
+      class {
+        constructor(public tracks: unknown[] = []) {}
+      },
+    )
+  }
+  const canvas = () => ({ captureStream: () => ({ getVideoTracks: () => [], getTracks: () => [] }) }) as unknown as HTMLCanvasElement
+
+  it('rejects an empty recording instead of returning a 0-byte movie', async () => {
+    stubRecorder([])
+    const h = startRecording({ canvas: canvas(), audio: null })
+    await h.started
+    await expect(h.stop()).rejects.toThrow(/empty/)
+  })
+
+  it('returns the recorded data', async () => {
+    stubRecorder([new Blob([new Uint8Array(10)])])
+    const h = startRecording({ canvas: canvas(), audio: null })
+    await h.started
+    const res = await h.stop()
+    expect(res.composite.size).toBe(10)
+    expect(res.mime).toBe('video/webm')
   })
 })

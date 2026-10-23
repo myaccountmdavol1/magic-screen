@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Animated Worlds Preview</title>
+    <style>
+      body { margin: 0; background: #222; color: #eee; font: 14px system-ui, sans-serif; }
+      #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; padding: 12px; }
+      figure { margin: 0; }
+      figure canvas, figure img { width: 100%; aspect-ratio: 16 / 9; display: block; border-radius: 8px; background: #000; }
+      figcaption { padding: 4px 2px; }
+      #single canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <div id="grid"></div>
+    <div id="single"></div>
+    <script type="module" src="./animated-preview.ts"></script>
+  </body>
+</html>

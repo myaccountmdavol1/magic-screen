@@ -2,13 +2,15 @@
 import { useMemo, useRef, type ChangeEvent } from 'react'
 import { useApp } from '../../state/store'
 import type { BackgroundChoice } from '../../types'
-import { StepShell } from '../../components/StepShell'
+import { READY_SPEAK, StepShell } from '../../components/StepShell'
+import { useRequestExit } from '../../components/StopDialog'
 import { Icon } from '../../components/Icon'
 import { toast } from '../../components/Toast'
 import { BUILTIN_BACKGROUNDS } from '../../assets/backgrounds'
 import { getBackgroundUrl, svgToDataUrl } from '../../assets/svg'
 import { playSound } from '../../lib/sound'
 import { speak } from '../../lib/voice'
+import { meAfterWorldChange } from '../../lib/worldHome'
 
 // An uploaded world lives behind a blob: URL. Once it stops being the chosen world
 // (another pick, a new upload, or "Make another" resetting the flow) nothing shows
@@ -23,7 +25,7 @@ export default function WorldStep() {
   const background = useApp((s) => s.background)
   const setBackground = useApp((s) => s.setBackground)
   const nextStep = useApp((s) => s.nextStep)
-  const goScreen = useApp((s) => s.goScreen)
+  const requestExit = useRequestExit()
   const fileRef = useRef<HTMLInputElement>(null)
 
   // SVG → data URL is a bit of work for 12 big SVGs; the helper caches it.
@@ -33,9 +35,14 @@ export default function WorldStep() {
   )
 
   const pick = (choice: BackgroundChoice) => {
+    // First pick: StepShell says "<name>! Great! Now tap the big arrow." as the arrow lights up.
+    const first = !useApp.getState().background
+    // C5: an untouched child moves to the new world's home spot (behind the desk, beside the map).
+    const st = useApp.getState()
+    st.setMe(meAfterWorldChange(st.me, st.background, choice))
     setBackground(choice)
     playSound('pop')
-    speak(choice.name)
+    if (!first) speak(choice.name)
   }
 
   const onFile = (e: ChangeEvent<HTMLInputElement>) => {
@@ -64,10 +71,16 @@ export default function WorldStep() {
       title="Pick a world"
       subtitle="Where do you want to go?"
       speak="Pick a world. Where do you want to go?"
-      back={{ label: 'Home', onClick: () => goScreen('home') }}
-      next={{ label: 'Next: Me!', onClick: nextStep, disabled: !background }}
+      back={{ label: 'Home', onClick: requestExit, hold: true }}
+      next={{
+        label: 'Next: Me!',
+        onClick: nextStep,
+        disabled: !background,
+        readySpeak: background ? `${background.name}! ${READY_SPEAK}` : READY_SPEAK,
+        blockedSpeak: 'Pick a world first!',
+      }}
     >
-      <div className="world-grid" role="radiogroup" aria-label="Worlds">
+      <div className="world-grid" role="radiogroup" aria-label="Worlds" data-nudge>
         {thumbs.map((bg) => {
           const selected = background?.kind === 'builtin' && background.builtinId === bg.id
           return (

@@ -43,7 +43,9 @@ export default function App() {
       <Blobs />
       <div className={`app-shell${screen === 'make' || screen === 'view' ? ' wide' : ''}`}>
         <header className="topbar">
-          <Logo onClick={screen === 'home' ? undefined : () => goScreen('home')} />
+          {/* In the Make flow the logo is just a picture: one stray tap used to throw the
+              creation away. Leaving goes through Back (step 1: hold Home), which asks first. */}
+          <Logo onClick={screen === 'home' || screen === 'make' ? undefined : () => goScreen('home')} />
         </header>
         <main key={screen} className="screen-view">
           <ErrorBoundary onReset={() => goScreen('home')}>

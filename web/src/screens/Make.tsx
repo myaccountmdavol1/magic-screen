@@ -1,11 +1,12 @@
-// The make flow: Talkline 5-step stepper + the current step. Owns the single live
+// The make flow: Talkline 5-step progress indicator + the current step. Owns the single live
 // Stage so the camera keeps running while the child moves between Me, Stickers and
 // Snap; unmounting Make (leaving the screen) or reaching Keep stops the camera.
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { STEPS, useApp } from '../state/store'
 import type { StepId } from '../types'
 import { Stepper, type StepperStep } from '../components/Stepper'
+import { ExitContext, StopDialog } from '../components/StopDialog'
 import Stage from '../components/Stage'
 import { EMPTY_STAGE_API, StageContext, type StageApi } from '../lib/useStage'
 import WorldStep from './steps/WorldStep'
@@ -43,7 +44,16 @@ function StepView({ step }: { step: StepId }) {
 export default function Make() {
   const step = useApp((s) => s.step)
   const maxStep = useApp((s) => s.maxStep)
-  const goStep = useApp((s) => s.goStep)
+  const goScreen = useApp((s) => s.goScreen)
+  const [stopOpen, setStopOpen] = useState(false)
+
+  // Leaving before Keep throws the creation away, so ask first (picture-only dialog).
+  // Nothing to lose yet (still on the first step, first visit) or already kept: just go.
+  const requestExit = useCallback(() => {
+    const s = useApp.getState()
+    if (s.step !== 'keep' && (s.maxStep > 0 || s.stickers.length > 0)) setStopOpen(true)
+    else goScreen('home')
+  }, [goScreen])
 
   const [api, setApi] = useState<StageApi>(EMPTY_STAGE_API)
   // Detached host for the one Stage instance; StageSlot moves it between steps.
@@ -61,14 +71,23 @@ export default function Make() {
         steps={STEP_DEFS}
         current={STEPS.indexOf(step)}
         max={maxStep}
-        onGo={(i) => goStep(STEPS[i])}
       />
-      <StageContext.Provider value={ctx}>
-        <div key={step} className="make-step">
-          <StepView step={step} />
-        </div>
-        {live && createPortal(<Stage onApi={setApi} />, host)}
-      </StageContext.Provider>
+      <ExitContext.Provider value={requestExit}>
+        <StageContext.Provider value={ctx}>
+          <div key={step} className="make-step">
+            <StepView step={step} />
+          </div>
+          {live && createPortal(<Stage onApi={setApi} />, host)}
+        </StageContext.Provider>
+      </ExitContext.Provider>
+      <StopDialog
+        open={stopOpen}
+        onKeepGoing={() => setStopOpen(false)}
+        onStop={() => {
+          setStopOpen(false)
+          goScreen('home')
+        }}
+      />
     </div>
   )
 }

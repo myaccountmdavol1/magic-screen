@@ -4,15 +4,20 @@
 // behave as in the app), reads back the matte and the composite after each
 // render(), and scores them against the ground truth.
 import { Compositor } from '../../../src/lib/keyer/Compositor'
-import type { Segmenter } from '../../../src/lib/segmenter'
+import { getFrontImage } from '../../../src/assets/svg'
+import { KEYER_TUNING } from '../../../src/lib/keyer/shaders'
+import { HelperTrustTracker } from '../../../src/lib/helperTrust'
+import { averageLinear, deltaE00, rgbToLab } from '../../../src/lib/keyer/labKey'
+import type { SegInput, SegModel, Segmenter } from '../../../src/lib/segmenter'
 import type { KeySettings, RGB } from '../../../src/types'
 import { decodeFrameRGBA, parseY4M } from '../../fixtures/gen/y4m'
 import { frameMetrics, meanMetrics, type FrameMetrics } from '../metrics'
 
 /** off: chroma only. on: Magic Helper running ("auto" setting: core fill only after the
  *  shirt signal). force: helper "on" setting (core fill always). synth: "on" setting
- *  fed a deterministic mask made from the GT (blurred, 256 px wide, one frame late). */
-export type HelperVariant = 'off' | 'on' | 'force' | 'synth'
+ *  fed a deterministic mask made from the GT (blurred, 256 px wide, one frame late).
+ *  synth-lagN: the same mask N frames late (a slow / late Magic Helper behind a moving kid). */
+export type HelperVariant = 'off' | 'on' | 'force' | 'synth' | `synth-lag${number}`
 
 export interface RunOptions {
   id: string
@@ -23,6 +28,15 @@ export interface RunOptions {
   cadence?: number
   /** return the middle frame's matte + composite for previews */
   dump?: boolean
+  /** segmenter model / input fit (default: the app's defaults) */
+  seg?: { model?: SegModel; input?: SegInput }
+  /** force the keying path instead of the auto decision (e.g. 'chroma' on a scene with
+   *  no screen reproduces the "garbage matte halo" bug report) */
+  mode?: 'chroma' | 'segment'
+  /** Compositor segment-mode tuning overrides (experiments) */
+  tune?: Record<string, number>
+  /** Compositor.setKeyerFlags overrides (feature A/B) */
+  flags?: Record<string, number>
 }
 
 interface Meta {
@@ -70,10 +84,60 @@ async function loadFixture(id: string): Promise<Fixture> {
   return { meta, cam, info: parseY4M(cam), alpha, fg }
 }
 
-let segPromise: Promise<Segmenter> | null = null
-function getSegmenter(): Promise<Segmenter> {
-  segPromise ??= import('../../../src/lib/segmenter').then((m) => m.createSegmenter())
-  return segPromise
+const segPromises = new Map<string, Promise<Segmenter>>()
+function getSegmenter(o: RunOptions['seg'] = {}): Promise<Segmenter> {
+  const k = JSON.stringify(o)
+  let p = segPromises.get(k)
+  if (!p) {
+    p = import('../../../src/lib/segmenter').then((m) => m.createSegmenter(o))
+    segPromises.set(k, p)
+  }
+  return p
+}
+
+/** IoU of the raw ML mask (> 0.5) against the GT (> 0.5), mask pixels mapped to frame pixels. */
+function maskIoU(m: { data: Uint8Array; w: number; h: number }, gt: Uint8Array, W: number, H: number): number {
+  let inter = 0
+  let uni = 0
+  for (let y = 0; y < m.h; y++) {
+    const gy = Math.min(H - 1, Math.floor(((y + 0.5) * H) / m.h))
+    for (let x = 0; x < m.w; x++) {
+      const gx = Math.min(W - 1, Math.floor(((x + 0.5) * W) / m.w))
+      const a = m.data[y * m.w + x] > 127
+      const b = gt[gy * W + gx] > 127
+      if (a && b) inter++
+      if (a || b) uni++
+    }
+  }
+  return uni ? inter / uni : 1
+}
+
+/**
+ * "Sloppy segmenter" stand-in for the AI cutout: GT -> 256-wide mask, grown by
+ * `grow` mask px (max filter, like a mask that spills onto the wall), blurred, and
+ * shifted by a deterministic ±`jitter` px per update (mask wobble). Tests whether
+ * the edge refinement snaps back to the real boundary.
+ */
+function sloppyMask(gt: Uint8Array, W: number, H: number, k: number, grow: number, jitter: number) {
+  const base = synthMask(gt, W, H)
+  const { w, h } = base
+  const src = base.data
+  const out = new Uint8Array(w * h)
+  const jx = jitter ? Math.round(Math.sin(k * 1.7) * jitter) : 0
+  const jy = jitter ? Math.round(Math.cos(k * 2.3) * jitter) : 0
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      let m = 0
+      for (let dy = -grow; dy <= grow; dy++)
+        for (let dx = -grow; dx <= grow; dx++) {
+          if (dx * dx + dy * dy > grow * grow) continue
+          const yy = Math.min(h - 1, Math.max(0, y + dy - jy))
+          const xx = Math.min(w - 1, Math.max(0, x + dx - jx))
+          m = Math.max(m, src[yy * w + xx])
+        }
+      out[y * w + x] = m
+    }
+  return { data: out, w, h }
 }
 
 /** GT alpha -> 256-wide blurred "coarse helper" mask (box average + 5x5 box blur). */
@@ -165,32 +229,75 @@ export async function runScenario(o: RunOptions) {
   c.setBackground(BG_CSS)
   c.setForeground(src, { mirror: false, live: true })
   c.setOutline(0)
+  if (o.tune) c.setSegTuning(o.tune)
+  if (o.flags) c.setKeyerFlags(o.flags)
 
   // frame 0 + the app's auto decision: screen found -> chroma with that key,
   // no screen -> AI cutout (segment) mode
   decodeFrameRGBA(fx.cam, fx.info, 0, img.data)
   sctx.putImageData(img, 0, 0)
+  let darkSignal: number | null = null
+  c.onSignal = (s) => {
+    if (s.type === 'dark') darkSignal = +s.L.toFixed(1)
+  }
   const found = c.sampleBorderColor()
-  const mode: KeySettings['mode'] = found ? 'chroma' : 'segment'
+  // True screen colour as the camera saw it on frame 0: linear mean of GT-background
+  // pixels in the top / side border bands (what a perfect auto key would pick).
+  let trueKey: RGB | null = null
+  if (fx.meta.screen !== 'none') {
+    const band = Math.round(Math.min(W, H) * 0.12)
+    const px: RGB[] = []
+    for (let y = 0; y < H - band; y += 2)
+      for (let x = 0; x < W; x += 2) {
+        if (x >= band && x < W - band && y >= band) continue
+        const i = y * W + x
+        if (fx.alpha[i] !== 0) continue
+        px.push([img.data[i * 4] / 255, img.data[i * 4 + 1] / 255, img.data[i * 4 + 2] / 255])
+      }
+    trueKey = averageLinear(px)
+  }
+  const keyDE = (k: RGB | null) => (k && trueKey ? +deltaE00(rgbToLab(k), rgbToLab(trueKey)).toFixed(2) : null)
+  const mode: KeySettings['mode'] = o.mode ?? (found ? 'chroma' : 'segment')
   const key: KeySettings = { ...DEFAULT_KEY, mode, color: (found ?? DEFAULT_KEY.color) as RGB }
   c.setKey(key)
 
   const segMode = mode === 'segment'
   const wantSeg = segMode || o.helper === 'on' || o.helper === 'force'
-  const seg = wantSeg ? await getSegmenter() : null
+  // seg model "sloppy-<grow>-<jitter>": a GT-derived bad mask instead of MediaPipe (segment scenarios)
+  const sloppy = /^sloppy-(\d+)-(\d+)$/.exec(String(o.seg?.model ?? ''))
+  const seg = wantSeg && !sloppy ? await getSegmenter(o.seg) : null
   let shirtSignal = false
   c.onSignal = (s) => {
+    if (s.type === 'dark') darkSignal = +s.L.toFixed(1)
     if (s.type === 'shirt') {
       shirtSignal = true
       if (o.helper !== 'off') c.setCoreFill(true)
     }
   }
-  c.setCoreFill(o.helper === 'force' || o.helper === 'synth')
+  const lagM = /^synth-lag(\d+)$/.exec(o.helper)
+  const synthLike = o.helper === 'synth' || !!lagM
+  const lag = lagM ? Math.max(1, +lagM[1]) : 1
+  c.setCoreFill(o.helper === 'force' || synthLike)
+
+  // Magic Helper trust, exactly as useStage runs it: camera-frame clock = k × interval.
+  const trust = new HelperTrustTracker()
+  trust.setFrameMs(1000 / fps)
+  const trustSeries: number[] = []
+  const onHelperMask = (m: { data: Uint8Array; w: number; h: number }, capturedFrame: number) => {
+    c.setMaskData(m.data, m.w, m.h)
+    c.setMlWeight(1)
+    if (!segMode) {
+      trust.onMask(m.data, m.w, m.h, (capturedFrame * 1000) / fps)
+      c.setMlDilate(trust.dilate(KEYER_TUNING.dilate))
+    }
+  }
 
   const per: FrameMetrics[] = []
   const segMs: number[] = []
   /** share of mask pixels the segmenter calls 'person' (sanity check) */
   const maskPerson: number[] = []
+  const ious: number[] = []
+  let segMaskSize = ''
   const kept: { k: number; alpha: Uint8Array; comp: Uint8Array | null }[] = []
   let dump: { frame: number; matte: string; comp: string } | null = null
   const dumpAt = Math.floor((warmup + frames) / 2)
@@ -207,16 +314,26 @@ export async function runScenario(o: RunOptions) {
       const m = seg.segment(src, ts)
       segMs.push(performance.now() - ts)
       if (m) {
-        c.setMaskData(m.data, m.w, m.h)
-        c.setMlWeight(1)
+        segMaskSize = `${m.w}x${m.h}`
+        onHelperMask(m, k)
         let hi = 0
         for (let i = 0; i < m.data.length; i++) if (m.data[i] > 127) hi++
         maskPerson.push(hi / m.data.length)
+        ious.push(maskIoU(m, fx.alpha.subarray(k * n, (k + 1) * n), W, H))
       }
-    } else if (o.helper === 'synth' && !segMode && k % cadence === 0 && k > 0) {
-      const m = synthMask(fx.alpha.subarray((k - 1) * n, k * n), W, H)
+    } else if (sloppy && segMode && k % cadence === 0) {
+      const m = sloppyMask(fx.alpha.subarray(Math.max(0, k - 1) * n, Math.max(1, k) * n), W, H, k, +sloppy[1], +sloppy[2])
       c.setMaskData(m.data, m.w, m.h)
       c.setMlWeight(1)
+      ious.push(maskIoU(m, fx.alpha.subarray(k * n, (k + 1) * n), W, H))
+    } else if (synthLike && !segMode && k % cadence === 0 && k >= lag) {
+      const m = synthMask(fx.alpha.subarray((k - lag) * n, (k - lag + 1) * n), W, H)
+      onHelperMask(m, k - lag)
+    }
+    if (!segMode) {
+      const t = trust.trust((k * 1000) / fps)
+      c.setMlTrust(t)
+      if (k >= warmup) trustSeries.push(t)
     }
     c.render()
     const matte = c.debugReadMatte()
@@ -240,6 +357,7 @@ export async function runScenario(o: RunOptions) {
         gt: fx.alpha.subarray(k * n, (k + 1) * n),
         prevAlpha: prev?.alpha ?? null,
         prevGt: prev ? fx.alpha.subarray((k - 1) * n, k * n) : null,
+        recentGt: [1, 2, 3].filter((d) => k - d >= 0).map((d) => fx.alpha.subarray((k - d) * n, (k - d + 1) * n)),
         comp,
         gtFg: fx.fg.subarray(k * n * 3, (k + 1) * n * 3),
         bg: BG,
@@ -258,14 +376,22 @@ export async function runScenario(o: RunOptions) {
     height: H,
     frames,
     scored: per.length,
-    cadence: wantSeg || o.helper === 'synth' ? cadence : 0,
+    cadence: wantSeg || synthLike ? cadence : 0,
     metrics: meanMetrics(per),
     series: { sad: per.map((m) => +m.sad.toFixed(3)) },
     info: {
       tier: stats.tier,
       analyticKey: stats.analyticKey,
+      /** foreground unmixing target format in use (rgba16f | srgb8 | off) */
+      unmix: stats.unmix,
       keyColor: stats.keyColor.map((v) => +v.toFixed(4)),
       sampledKey: found ? found.map((v) => +v.toFixed(4)) : null,
+      /** ΔE00 of the frame-0 auto key / the final tracked key vs the true screen colour */
+      sampledKeyDE: keyDE(found),
+      finalKeyDE: mode === 'chroma' ? keyDE(stats.keyColor) : null,
+      keyStatus: stats.borderKey ?? null,
+      /** "add more light" signal: median screen L when it fired */
+      darkSignal,
       lo: +stats.lo.toFixed(3),
       hi: +stats.hi.toFixed(3),
       autoKey: stats.autoKey,
@@ -277,6 +403,11 @@ export async function runScenario(o: RunOptions) {
       /** ms the clip ran behind real time (pacing check; ~0 is good) */
       lateMs: Math.round(late),
       maskPersonFrac: maskPerson.length ? +(maskPerson.reduce((x, y) => x + y, 0) / maskPerson.length).toFixed(3) : null,
+      trustMean: trustSeries.length ? +(trustSeries.reduce((x, y) => x + y, 0) / trustSeries.length).toFixed(3) : null,
+      trustMin: trustSeries.length ? +Math.min(...trustSeries).toFixed(3) : null,
+      maskIoU: ious.length ? +(ious.reduce((x, y) => x + y, 0) / ious.length).toFixed(4) : null,
+      maskSize: seg ? segMaskSize : null,
+      seg: seg ? (o.seg ?? null) : null,
       segMsMedian: segMs.length ? +segMs.sort((a, b) => a - b)[segMs.length >> 1].toFixed(2) : null,
     },
     dump,
@@ -290,6 +421,9 @@ export interface TimingOptions {
   height?: number
   frames?: number
   warmup?: number
+  flags?: Record<string, number>
+  /** C5: draw this built-in world's front layer (desk, fence...) over the child */
+  front?: string
 }
 
 /**
@@ -328,11 +462,15 @@ export async function timing(o: TimingOptions) {
   const sctx = src.getContext('2d')!
   const c = new Compositor(stage, { width: SW, height: SH })
   const gl = stage.getContext('webgl2') as WebGL2RenderingContext
+  if (o.flags) c.setKeyerFlags(o.flags)
   c.setBackground(BG_CSS)
+  if (o.front) c.setForegroundOverlay(await getFrontImage(o.front))
   c.setForeground(src, { mirror: true, live: true })
   sctx.drawImage(bitmaps[0], 0, 0)
   const found = c.sampleBorderColor()
-  c.setKey({ ...DEFAULT_KEY, color: (found ?? DEFAULT_KEY.color) as RGB })
+  // Same auto decision as the app: no screen -> AI cutout (segment) mode, fed masks.
+  const segMode = !found
+  c.setKey({ ...DEFAULT_KEY, mode: segMode ? 'segment' : 'chroma', color: (found ?? DEFAULT_KEY.color) as RGB })
   const px = new Uint8Array(4)
   const cpu: number[] = []
   const sync: number[] = []
@@ -351,7 +489,7 @@ export async function timing(o: TimingOptions) {
   for (let k = 0; k < warm + frames; k++) {
     await new Promise((r) => requestAnimationFrame(r))
     sctx.drawImage(bitmaps[k % N], 0, 0)
-    if (o.helper === 'synth' && k % 2 === 0) {
+    if ((o.helper === 'synth' || segMode) && k % 2 === 0) {
       const m = masks[k % N]
       c.setMaskData(m.data, m.w, m.h)
       c.setMlWeight(1)
@@ -388,8 +526,10 @@ export async function timing(o: TimingOptions) {
     id: o.id,
     helper: o.helper,
     stage: `${SW}x${SH}`,
+    mode: segMode ? 'segment' : 'chroma',
     frames,
     tier: stats.tier,
+    unmix: stats.unmix,
     cpuMedian: q(cpu, 0.5),
     cpuP90: q(cpu, 0.9),
     syncMedian: q(sync, 0.5),
@@ -400,10 +540,37 @@ export async function timing(o: TimingOptions) {
   }
 }
 
+/** ms per segment() call (inference + mask readback) for a model / input fit, on a 1280x720 frame. */
+export async function segTiming(o: { id: string; seg?: RunOptions['seg']; frames?: number }) {
+  const fx = await loadFixture(o.id)
+  const { width: W, height: H } = fx.meta
+  const small = document.createElement('canvas')
+  small.width = W
+  small.height = H
+  const img = new ImageData(W, H)
+  decodeFrameRGBA(fx.cam, fx.info, 0, img.data)
+  small.getContext('2d')!.putImageData(img, 0, 0)
+  const src = document.createElement('canvas')
+  src.width = 1280
+  src.height = 720
+  src.getContext('2d')!.drawImage(small, 0, 0, 1280, 720)
+  const seg = await getSegmenter(o.seg)
+  const times: number[] = []
+  const n = o.frames ?? 60
+  for (let k = 0; k < n + 10; k++) {
+    await new Promise((r) => requestAnimationFrame(r))
+    const t0 = performance.now()
+    seg.segment(src, t0)
+    if (k >= 10) times.push(performance.now() - t0)
+  }
+  times.sort((a, b) => a - b)
+  return { seg: o.seg ?? null, delegate: seg.delegate, median: +times[times.length >> 1].toFixed(2), p90: +times[Math.floor(times.length * 0.9)].toFixed(2) }
+}
+
 declare global {
   interface Window {
-    harness: { runScenario: typeof runScenario; timing: typeof timing; glInfo: typeof glInfo; ready: boolean }
+    harness: { runScenario: typeof runScenario; timing: typeof timing; segTiming: typeof segTiming; glInfo: typeof glInfo; ready: boolean }
   }
 }
-window.harness = { runScenario, timing, glInfo, ready: true }
+window.harness = { runScenario, timing, segTiming, glInfo, ready: true }
 log('keyer harness ready')

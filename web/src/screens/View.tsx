@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useApp } from '../state/store'
-import { deleteCreation, getCreation, getCreationBlob } from '../lib/storage'
+import { getCreation, getCreationBlob } from '../lib/storage'
 import { saveToDevice } from '../lib/recorder'
 import { playSound } from '../lib/sound'
 import type { Creation } from '../types'
 import { Panel } from '../components/Panel'
 import { Button } from '../components/Button'
 import { Icon } from '../components/Icon'
-import { ConfirmDialog } from '../components/ParentGate'
 import { toast } from '../components/Toast'
 
 function extFor(mime: string, kind: Creation['kind']) {
@@ -16,6 +15,17 @@ function extFor(mime: string, kind: Creation['kind']) {
   if (mime.includes('jpeg')) return 'jpg'
   if (mime.includes('png')) return 'png'
   return kind === 'video' ? 'mp4' : 'png'
+}
+
+/** "My photo · Oct 22": tells a kid (and the grown-up helping) whose and which one this is. */
+export function viewTitle(kind: Creation['kind'] | undefined, createdAt?: number): string {
+  const what = kind === 'video' ? 'My video' : 'My photo'
+  if (createdAt == null) return what
+  try {
+    return `${what} · ${new Date(createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+  } catch {
+    return what
+  }
 }
 
 type LoadState =
@@ -27,7 +37,6 @@ export default function View() {
   const viewingId = useApp((s) => s.viewingId)
   const goScreen = useApp((s) => s.goScreen)
   const [state, setState] = useState<LoadState>({ status: 'loading' })
-  const [confirmOpen, setConfirmOpen] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -69,21 +78,11 @@ export default function View() {
     }
   }
 
-  const onDelete = async () => {
-    if (!viewingId) return
-    setConfirmOpen(false)
-    try {
-      await deleteCreation(viewingId)
-      playSound('pop')
-      toast('All gone!')
-    } catch {
-      toast('Oops! Could not delete it.')
-    }
-    goScreen('home')
-  }
-
   return (
     <Panel className="view">
+      <header className="step-header view-header">
+        <h1>{state.status === 'ready' ? viewTitle(state.creation.kind, state.creation.createdAt) : state.status === 'missing' ? 'Oops!' : 'My creation'}</h1>
+      </header>
       <div className="view-stage-wrap">
         {state.status === 'loading' && <div className="view-stage skeleton" aria-busy="true" />}
         {state.status === 'missing' && (
@@ -111,25 +110,14 @@ export default function View() {
         >
           Save
         </Button>
-        <Button variant="danger" size="lg" icon="trash" onClick={() => setConfirmOpen(true)} disabled={state.status === 'loading'}>
-          Delete
-        </Button>
       </div>
 
+      {/* Delete is grown-up only now (Teacher → Creations, with a 7-day Recently deleted bin). */}
       <div className="nav-row">
-        <Button variant="secondary" size="lg" icon="back" onClick={() => goScreen('home')}>
-          Back
+        <Button variant="secondary" size="lg" icon="home" onClick={() => goScreen('home')}>
+          Home
         </Button>
       </div>
-
-      <ConfirmDialog
-        open={confirmOpen}
-        title="Delete this?"
-        message="It will be gone for good."
-        confirmLabel="Delete"
-        onConfirm={onDelete}
-        onCancel={() => setConfirmOpen(false)}
-      />
     </Panel>
   )
 }

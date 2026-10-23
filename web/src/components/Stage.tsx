@@ -7,13 +7,22 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useApp } from '../state/store'
 import type { RGB } from '../types'
 import { Compositor } from '../lib/keyer/Compositor'
-import { CameraError, startCamera, type CameraErrorKind, type CameraHandle } from '../lib/camera'
+import {
+  CameraError,
+  cameraLooksAsleep,
+  startCamera,
+  watchCamera,
+  type CameraErrorKind,
+  type CameraHandle,
+} from '../lib/camera'
+import { speak } from '../lib/voice'
 import { playSound } from '../lib/sound'
 import {
   EMPTY_STAGE_API,
   STAGE_SIZES,
   clamp,
   loadBackgroundSource,
+  loadFrontOverlay,
   loadStickerImages,
   useKeyerRuntime,
   useStage,
@@ -32,12 +41,33 @@ const ME_SCALE: [number, number] = [0.4, 2]
 /** Extra forgiving hit area around stickers for small fingers (px). */
 const HIT_PAD = 12
 
+/** Keyer hints: the long "Grown-ups: …" ones stay up longer and can be tapped away. */
+const notifyKeyer = (message: string) => toast(message, { grownup: message.startsWith('Grown-ups') })
+
 /** atan2 deltas jump by ±2π when the finger line crosses ±180°; keep each step small. */
 const wrapAngle = (a: number) => a - 2 * Math.PI * Math.round(a / (2 * Math.PI))
 
 type Point = { x: number; y: number }
 type GestureTarget = { kind: 'me' } | { kind: 'sticker'; uid: string } | null
 type Sparkle = { id: number; x: number; y: number }
+
+/** Last keying path Auto settled on, per device (calm start). Storage may be unavailable. */
+const LAST_MODE_KEY = 'magicscreen.lastKeyingMode'
+function readLastMode(): KeyingMode | null {
+  try {
+    const v = localStorage.getItem(LAST_MODE_KEY)
+    return v === 'chroma' || v === 'segment' ? v : null
+  } catch {
+    return null
+  }
+}
+function writeLastMode(m: KeyingMode) {
+  try {
+    localStorage.setItem(LAST_MODE_KEY, m)
+  } catch {
+    /* private mode etc.: just don't remember */
+  }
+}
 
 export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
   const settings = useApp((s) => s.settings)
@@ -47,7 +77,10 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
   const selectedUid = useApp((s) => s.selectedStickerUid)
   const me = useApp((s) => s.me)
 
-  const { facing, resolution, mirror, greenScreenMode } = settings
+  const { resolution, mirror, greenScreenMode } = settings
+  // A grown-up's Flip on the Me step lasts for this session only; settings.facing stays the default.
+  const sessionFacing = useApp((s) => s.sessionFacing)
+  const facing = sessionFacing ?? settings.facing
   const magicHelper = settings.magicHelper ?? 'auto'
   const size = STAGE_SIZES[resolution] ?? STAGE_SIZES['720p']
 
@@ -64,8 +97,12 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
   const [sparkles, setSparkles] = useState<Sparkle[]>([])
   const [box, setBox] = useState({ w: 0, h: 0 })
   // 'auto' resolves live to whichever path fits what the camera sees.
-  const [autoMode, setAutoMode] = useState<KeyingMode>('chroma')
+  // Calm start: begin in the mode this device found last time, and cover the stage
+  // ("Finding you…") until the first look at the camera has decided.
+  const [autoMode, setAutoMode] = useState<KeyingMode>(() => readLastMode() ?? 'chroma')
+  const [autoDecided, setAutoDecided] = useState(false)
   const mode: KeyingMode = greenScreenMode === 'auto' ? autoMode : greenScreenMode
+  const modeDecided = greenScreenMode !== 'auto' || autoDecided
 
   // --- compositor lifecycle -------------------------------------------------
   const pendingDestroy = useRef(0)
@@ -140,6 +177,51 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
     }
   }, [facing, resolution, retryNonce])
 
+  // --- camera drop: the OS took the camera away mid-session ------------------------
+  // Without this the picture just freezes. Show a "Camera fell asleep" cover with one
+  // big button, and wake it automatically once when the child comes back to the app.
+  const [asleep, setAsleep] = useState(false)
+  const autoWoke = useRef(false)
+  useEffect(() => {
+    setAsleep(false)
+    if (!cam) return
+    const unwatch = watchCamera(cam.stream, (a) => {
+      setAsleep(a)
+      if (a) speak('The camera fell asleep. Tap the big button to wake it up!')
+    })
+    let visTimer = 0
+    const onVis = () => {
+      window.clearTimeout(visTimer)
+      if (document.hidden) return
+      // Give iOS a moment to unmute the track on its own before deciding.
+      visTimer = window.setTimeout(() => {
+        if (document.hidden || !cameraLooksAsleep(cam.stream)) return
+        if (!autoWoke.current) {
+          autoWoke.current = true
+          setRetryNonce((n) => n + 1)
+        } else {
+          setAsleep(true)
+        }
+      }, 800)
+    }
+    document.addEventListener('visibilitychange', onVis)
+    // A camera that keeps running for a while earns another automatic wake later.
+    const healthy = window.setTimeout(() => {
+      autoWoke.current = false
+    }, 5000)
+    return () => {
+      unwatch()
+      window.clearTimeout(visTimer)
+      window.clearTimeout(healthy)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [cam])
+  const wakeCamera = useCallback(() => {
+    playSound('magic')
+    setAsleep(false)
+    setRetryNonce((n) => n + 1)
+  }, [])
+
   const mirrored = mirror && facing === 'user'
   useEffect(() => {
     compositorRef.current?.setForeground(cam?.video ?? null, { mirror: mirrored })
@@ -181,6 +263,21 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
     }
   }, [background])
 
+  // --- world front layer (C5: desk / fence drawn over the child, under stickers) ---
+  useEffect(() => {
+    let cancelled = false
+    loadFrontOverlay(background)
+      .then((img) => {
+        if (!cancelled) compositorRef.current?.setForegroundOverlay(img)
+      })
+      .catch(() => {
+        if (!cancelled) compositorRef.current?.setForegroundOverlay(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [background])
+
   // --- stickers -------------------------------------------------------------
   useEffect(() => {
     let cancelled = false
@@ -198,7 +295,7 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
     video: cam?.video ?? null,
     mode,
     helper: magicHelper,
-    notify: toast,
+    notify: notifyKeyer,
   })
   const beforeRender = keyer.beforeRender
 
@@ -242,6 +339,7 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
     if (!cam || greenScreenMode !== 'auto') return
     let hits = 0
     let misses = 0
+    let first = true
     const id = window.setInterval(() => {
       const c = compositorRef.current?.sampleBorderColor() ?? null
       if (c) {
@@ -251,18 +349,29 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
         misses++
         hits = 0
       }
-      if (hits >= 2 && autoModeRef.current !== 'chroma') {
+      // The first look decides at once (the cover is up); later switches need two in a row.
+      const need = first ? 1 : 2
+      if (first) {
+        first = false
+        setAutoDecided(true)
+      }
+      if (hits >= need && autoModeRef.current !== 'chroma') {
         setKeyColor(c as RGB)
         setAutoMode('chroma')
-      } else if (misses >= 2 && autoModeRef.current !== 'segment') {
+        writeLastMode('chroma')
+      } else if (misses >= need && autoModeRef.current !== 'segment') {
+        writeLastMode('segment')
         setAutoMode('segment')
         if (!autoToastShown.current) {
           autoToastShown.current = true
-          toast('No green screen? No problem. Magic cutout is on!')
+          toast('Magic cutout is on!')
         }
       }
     }, 700)
-    return () => window.clearInterval(id)
+    return () => {
+      window.clearInterval(id)
+      setAutoDecided(false)
+    }
   }, [cam, greenScreenMode])
 
   // --- stage size (for DOM overlays + hit tests) ------------------------------
@@ -301,8 +410,9 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
       armMagicFinger,
       retryCamera,
       helperActive: keyer.active && mode === 'chroma',
+      modeDecided,
     }),
-    [cam, error, mode, keyColor, autoKey, magicArmed, armMagicFinger, retryCamera, keyer.active],
+    [cam, error, mode, modeDecided, keyColor, autoKey, magicArmed, armMagicFinger, retryCamera, keyer.active],
   )
   useEffect(() => {
     onApi(api)
@@ -545,6 +655,13 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
         </div>
       )}
 
+      {!loading && cam && !modeDecided && !showError && (
+        <div className="stage-cover stage-loading" role="status">
+          <span className="stage-spinner" aria-hidden="true" />
+          <span>Finding you…</span>
+        </div>
+      )}
+
       {showError && (
         <CameraTrouble
           kind={error}
@@ -552,12 +669,26 @@ export default function Stage({ onApi }: { onApi: (api: StageApi) => void }) {
           onContinue={() => setErrorDismissed(true)}
         />
       )}
+
+      {asleep && cam && !showError && (
+        <div className="stage-cover stage-trouble stage-asleep" role="alert">
+          <span className="trouble-icon" aria-hidden="true">
+            <Icon name="camera" size={40} />
+          </span>
+          <h2>Camera fell asleep</h2>
+          <div className="trouble-actions">
+            <Button variant="primary" size="xl" icon="refresh" onClick={wakeCamera}>
+              Wake it up
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 const TROUBLE: Record<CameraErrorKind, { title: string; text: string; retry: boolean }> = {
-  denied: { title: 'Camera is asleep', text: 'Ask a grown-up to let Magic Screen use the camera.', retry: true },
+  denied: { title: 'Ask a grown-up to turn on the camera', text: 'Grown-ups: allow the camera for Magic Screen in Settings, then tap Try again.', retry: true },
   insecure: { title: 'Camera is locked', text: 'Magic Screen needs a safe https:// link to use the camera.', retry: false },
   missing: { title: 'No camera found', text: 'You can still make a picture with just your world.', retry: true },
   other: { title: 'Camera is shy', text: "The camera didn't start. Let's try again!", retry: true },

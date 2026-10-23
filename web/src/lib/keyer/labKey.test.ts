@@ -5,6 +5,7 @@ import {
   averageLinear,
   combineThresholds,
   deltaE00,
+  median,
   keyDistLab,
   keyDistRgb,
   keyLabParams,
@@ -52,11 +53,23 @@ describe('colour conversions', () => {
   })
 })
 
+describe('median', () => {
+  it('handles odd, even and empty lists', () => {
+    expect(median([3, 1, 2])).toBe(2)
+    expect(median([4, 1, 3, 2])).toBe(2.5)
+    expect(median([])).toBeNaN()
+  })
+})
+
 describe('deltaE00 (Sharma 2005 test pairs)', () => {
   it('matches pairs #1, #7, #17', () => {
     expect(deltaE00([50, 2.6772, -79.7751], [50, 0, -82.7485])).toBeCloseTo(2.0425, 4)
     expect(deltaE00([50, 0, 0], [50, -1, 2])).toBeCloseTo(2.3669, 4)
     expect(deltaE00([50, 2.5, 0], [73, 25, -18])).toBeCloseTo(27.1492, 4)
+  })
+  it('kL > 1 discounts lightness only', () => {
+    expect(deltaE00([50, 0, 0], [60, 0, 0], 2)).toBeCloseTo(deltaE00([50, 0, 0], [60, 0, 0]) / 2, 6)
+    expect(deltaE00([50, 0, 0], [50, -1, 2], 3)).toBeCloseTo(2.3669, 4)
   })
   it('is zero for identical colours', () => {
     expect(deltaE00([60, -50, 40], [60, -50, 40])).toBe(0)

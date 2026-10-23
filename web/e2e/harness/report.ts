@@ -13,6 +13,7 @@ export interface RunResult {
 export interface TimingResult {
   id: string
   helper: string
+  mode?: string
   stage: string
   frames: number
   tier: string
@@ -32,6 +33,7 @@ export interface Results {
   options: Record<string, unknown>
   runs: RunResult[]
   timing: TimingResult[]
+  segTiming?: unknown[]
 }
 
 const fmt = (v: number | null | undefined, d: number) => (v === null || v === undefined || !Number.isFinite(v) ? '–' : v.toFixed(d))
@@ -44,10 +46,15 @@ export function toMarkdown(r: Results): string {
   const helpers = [...new Set(r.runs.map((x) => x.helper))]
   for (const h of helpers) {
     out.push(`## Magic Helper: ${h}`, '')
-    out.push(`| scenario | mode | ${METRIC_KEYS.map((k) => METRIC_INFO[k].label).join(' | ')} |`)
-    out.push(`|---|---|${METRIC_KEYS.map(() => '---:').join('|')}|`)
+    out.push(`| scenario | mode | ${METRIC_KEYS.map((k) => METRIC_INFO[k].label).join(' | ')} | ML mask IoU | key ΔE00 (frame 0 / final) |`)
+    out.push(`|---|---|${METRIC_KEYS.map(() => '---:').join('|')}|---:|---:|`)
     for (const run of r.runs.filter((x) => x.helper === h)) {
-      out.push(`| ${run.id} | ${run.mode} | ${METRIC_KEYS.map((k) => fmt(run.metrics[k], METRIC_INFO[k].digits)).join(' | ')} |`)
+      const iou = run.info.maskIoU as number | null | undefined
+      const k0 = run.info.sampledKeyDE as number | null | undefined
+      const k1 = run.info.finalKeyDE as number | null | undefined
+      const st = run.info.keyStatus as string | null | undefined
+      const keyCell = k0 == null && k1 == null ? '–' : `${fmt(k0 ?? null, 2)} / ${fmt(k1 ?? null, 2)}${st ? ` (${st})` : ''}`
+      out.push(`| ${run.id} | ${run.mode} | ${METRIC_KEYS.map((k) => fmt(run.metrics[k], METRIC_INFO[k].digits)).join(' | ')} | ${fmt(iou ?? null, 3)} | ${keyCell} |`)
     }
     out.push('')
   }

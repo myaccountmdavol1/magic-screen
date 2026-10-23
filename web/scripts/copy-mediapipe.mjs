@@ -10,9 +10,13 @@ const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const srcWasm = join(webRoot, 'node_modules', '@mediapipe', 'tasks-vision', 'wasm')
 const outDir = join(webRoot, 'public', 'mediapipe')
 const outWasm = join(outDir, 'wasm')
-const modelPath = join(outDir, 'selfie_segmenter.tflite')
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite'
+// Both ~250 KB, Apache-2.0. The landscape model is the AI cutout default for
+// landscape cameras; the square one serves portrait cameras (src/lib/segmenter.ts).
+const MODELS = ['selfie_segmenter', 'selfie_segmenter_landscape'].map((name) => ({
+  name,
+  path: join(outDir, `${name}.tflite`),
+  url: `https://storage.googleapis.com/mediapipe-models/image_segmenter/${name}/float16/latest/${name}.tflite`,
+}))
 
 async function exists(p) {
   try {
@@ -35,9 +39,9 @@ async function copyWasm() {
   console.log(`[copy-mediapipe] copied ${files.length} wasm files to public/mediapipe/wasm`)
 }
 
-async function downloadModel() {
+async function downloadModel({ name, path: modelPath, url: MODEL_URL }) {
   if (await exists(modelPath)) {
-    console.log('[copy-mediapipe] model already present')
+    console.log(`[copy-mediapipe] ${name} already present`)
     return
   }
   if (process.env.MAGIC_SKIP_MODEL_DOWNLOAD) {
@@ -54,7 +58,7 @@ async function downloadModel() {
     // Write then rename so an interrupted download never leaves a corrupt model.
     await writeFile(tmp, buf)
     await rename(tmp, modelPath)
-    console.log(`[copy-mediapipe] downloaded selfie_segmenter.tflite (${Math.round(buf.length / 1024)} KB)`)
+    console.log(`[copy-mediapipe] downloaded ${name}.tflite (${Math.round(buf.length / 1024)} KB)`)
   } catch (err) {
     await unlink(tmp).catch(() => {})
     console.warn(`[copy-mediapipe] could not download model (${err.message}); AI cutout needs it. Re-run "node scripts/copy-mediapipe.mjs" when online.`)
@@ -72,7 +76,7 @@ async function copyLicense() {
 try {
   await copyWasm()
   await copyLicense()
-  await downloadModel()
+  for (const m of MODELS) await downloadModel(m)
 } catch (err) {
   console.warn('[copy-mediapipe] skipped:', err?.message ?? err)
 }

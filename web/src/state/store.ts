@@ -22,7 +22,8 @@ export const DEFAULT_SETTINGS: Settings = {
   mirror: true,
   facing: 'user',
   resolution: '720p',
-  maxVideoSec: 60,
+  maxVideoSec: 15,
+  recordSound: true,
   countdownSec: 3,
   key: { color: [0.2, 0.75, 0.3], similarity: 0.4, smoothness: 0.08, spill: 0.6 },
   greenScreenMode: 'auto',
@@ -87,6 +88,8 @@ interface AppState {
   settings: Settings
   /** set once the child has tapped anything (unlocks audio/speech on iOS) */
   audioUnlocked: boolean
+  /** Grown-up "Flip camera" on the Me step: overrides settings.facing until reload (null = use the setting). */
+  sessionFacing: Settings['facing'] | null
 
   goScreen: (s: ScreenId) => void
   goStep: (s: StepId) => void
@@ -104,6 +107,7 @@ interface AppState {
   viewCreation: (id: string) => void
   updateSettings: (patch: Partial<Settings>) => void
   unlockAudio: () => void
+  setSessionFacing: (f: Settings['facing'] | null) => void
   /** reset the make-flow for a brand new creation */
   newCreation: () => void
 }
@@ -124,6 +128,7 @@ export const useApp = create<AppState>((set, get) => ({
   viewingId: null,
   settings: loadSettings(),
   audioUnlocked: false,
+  sessionFacing: null,
 
   goScreen: (screen) => set({ screen }),
   goStep: (step) => {
@@ -172,6 +177,7 @@ export const useApp = create<AppState>((set, get) => ({
     set({ settings })
   },
   unlockAudio: () => set({ audioUnlocked: true }),
+  setSessionFacing: (sessionFacing) => set({ sessionFacing }),
   newCreation: () =>
     set({
       screen: 'make',

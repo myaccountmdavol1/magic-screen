@@ -42,7 +42,7 @@ npm run dev      # http://localhost:5173 (also served on your LAN)
 
 Other scripts: `npm test` (Vitest), `npm run typecheck`, `npm run build` (output in `web/dist/`), `npm run preview`.
 
-`npm install` downloads `selfie_segmenter.tflite` (about 250 KB) from Google's model storage once, at install time. Set `MAGIC_SKIP_MODEL_DOWNLOAD=1` to skip it. Without the model, AI cutout and the Magic Helper turn off, and the colour keyer still works.
+`npm install` downloads `selfie_segmenter.tflite` and `selfie_segmenter_landscape.tflite` (about 250 KB each) from Google's model storage once, at install time. Set `MAGIC_SKIP_MODEL_DOWNLOAD=1` to skip it. Without the model, AI cutout and the Magic Helper turn off, and the colour keyer still works.
 
 ## Using it on an iPad
 

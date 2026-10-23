@@ -7,7 +7,18 @@
 // (Magic Helper garbage/core mattes) → choke → alpha-aware despill → light wrap.
 import type { KeySettings, MeTransform, RGB } from '../../types'
 import { fadeToward } from '../deviceTier'
-import { autoKeyFromSamples, despill, dominantChannel, type AutoKeyResult } from './autoKey'
+import {
+  BORDER_KEY,
+  autoKeyFromSamples,
+  autoKeyFromScreen,
+  despill,
+  dominantChannel,
+  isScreenLike,
+  robustBorderKey,
+  type AutoKeyResult,
+  type BorderCell,
+  type BorderKeyStatus,
+} from './autoKey'
 import { bakeKeyLut, makeByteIndex, sampleKeyLut, uploadKeyLut } from './keyLut'
 import {
   LUT_N,
@@ -20,16 +31,28 @@ import {
   labToRgb,
   rgbToLab,
   sliderThresholds,
+  srgbToLinear,
   type KeyLab,
   type Lab,
   type Thresholds,
 } from './labKey'
 import {
   BLUR_DOWN_FS,
+  BOX4_FS,
+  BOXR_FS,
   BOX_FS,
+  CGF_COEF_FS,
+  CHECKER_FS,
+  CGF_PACK_FS,
+  DS_BOX_FS,
+  DS_DOWN_FS,
+  DS_TUNING,
   FG_FS,
+  FLATTEN_TUNING,
   GF_COEF_FS,
   GF_PACK_FS,
+  GF_TEMPORAL_FS,
+  GF_TEMPORAL_TUNING,
   IMAGE_FS,
   KEYER_TUNING,
   MASK_PREP_FS,
@@ -37,7 +60,13 @@ import {
   PASS_VS,
   QUAD_VS,
   SAMPLE_FS,
+  KEYER_FLAGS,
+  SEG_TUNING,
+  UNMIX_TUNING,
   matteFs,
+  unmixPrepFs,
+  type KeyerFlags,
+  type SegTuning,
 } from './shaders'
 
 export type BackgroundSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | ImageBitmap
@@ -55,6 +84,7 @@ export interface StickerDraw {
 export type KeyerSignal =
   | { type: 'uneven'; p95: number } // screen too wrinkled / badly lit for a clean key
   | { type: 'shirt' } // clothing is screen-coloured; the Magic Helper should step in
+  | { type: 'dark'; L: number } // the screen is underlit: ask a grown-up for more light
 
 export interface KeyerStats {
   tier: 'canvas2d' | 'webgl-tent' | 'webgl-full'
@@ -70,8 +100,14 @@ export interface KeyerStats {
   /** key colour currently baked into the LUT (follows white-balance drift) */
   keyColor: RGB
   autoKey: { p95: number; tooUneven: boolean } | null
+  /** robust border key (item 6): status of the last auto-key look, null before the first */
+  borderKey: BorderKeyStatus | null
   mlWeight: number
   coreWeight: number
+  /** Magic Helper trust last set (1 = fresh / no trust model) */
+  mlTrust: number
+  /** foreground unmixing: target format in use, or off */
+  unmix: 'rgba16f' | 'srgb8' | 'off'
   /** ms since the last ML mask arrived (Infinity if never) */
   maskAgeMs: number
   /** times the drift tracker re-baked the key */
@@ -312,6 +348,19 @@ interface GlState {
   maskPrep: Prog
   blurDown: Prog
   sample: Prog
+  cgfPack: Prog
+  box4: Prog
+  boxR: Prog
+  cgfCoef: Prog
+  unmixPrep: Prog
+  dsDown: Prog
+  dsBox: Prog
+  gfTemporal: Prog
+  checker: Prog
+  /** item 5: coefficient history ping-pong (half res, RGBA16F) */
+  gfHist: [Target, Target] | null
+  /** speck / hole box sums (item 4) at 1/4 matte res; RGBA16F when floatOk */
+  dsT: [Target, Target] | null
   /** shader computes keyD itself (3D LUT unavailable) */
   analytic: boolean
   /** RGBA16F render targets work → guided filter */
@@ -321,11 +370,22 @@ interface GlState {
   maskTex: WebGLTexture
   lutTex: WebGLTexture | null
   stickerTex: Map<HTMLImageElement | ImageBitmap, WebGLTexture>
+  /** C5 front layer (desk, fence...): texture + which image it currently holds */
+  frontTex: WebGLTexture
+  frontFor: HTMLImageElement | ImageBitmap | null
   matteT: [Target, Target] | null
   gfT: [Target, Target, Target] | null
   prepT: [Target, Target] | null
   bgBlurT: [Target, Target] | null
   sampleT: Target | null
+  /** colour guided filter (segment mode): two MRT sets of 4 + coefficient ping-pong */
+  cgf: CgfTargets | null
+  /** MRT (4 draw buffers) available */
+  mrtOk: boolean
+  /** foreground unmixing targets (item 3); null until first needed or when unavailable */
+  unT: UnmixTargets | null
+  /** unmixing state: untried, the target format in use, or off (no usable format) */
+  unmixFmt: 'untried' | 'rgba16f' | 'srgb8' | 'off'
   pbo: WebGLBuffer | null
   pending: Pending | null
 }
@@ -386,8 +446,19 @@ function newTexture(gl: WebGL2RenderingContext): WebGLTexture {
   return t
 }
 
-function createTarget(gl: WebGL2RenderingContext, w: number, h: number, float: boolean): Target | null {
+/**
+ * @param wrap CLAMP_TO_EDGE (default) or MIRRORED_REPEAT. Filter taps past the frame
+ *   edge then read mirrored interior texels instead of the edge texel repeated, so box
+ *   filters and the guided filter are not pulled toward one edge texel where an arm
+ *   leaves the frame (plan item 1; idea from CorridorKey's reflect padding). Never
+ *   for targets whose box sums count area (a speck at the edge would count double).
+ */
+function createTarget(gl: WebGL2RenderingContext, w: number, h: number, float: boolean, wrap: number = gl.CLAMP_TO_EDGE): Target | null {
   const tex = newTexture(gl)
+  if (wrap !== gl.CLAMP_TO_EDGE) {
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
+  }
   if (float) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null)
   else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
   const fbo = gl.createFramebuffer()
@@ -416,10 +487,10 @@ function deleteTargets(gl: WebGL2RenderingContext, list: readonly (Target | null
   }
 }
 
-function makeTargets<N extends number>(gl: WebGL2RenderingContext, n: N, w: number, h: number, float: boolean) {
+function makeTargets<N extends number>(gl: WebGL2RenderingContext, n: N, w: number, h: number, float: boolean, wrap?: number) {
   const out: Target[] = []
   for (let i = 0; i < n; i++) {
-    const t = createTarget(gl, w, h, float)
+    const t = createTarget(gl, w, h, float, wrap)
     if (!t) {
       deleteTargets(gl, out)
       return null
@@ -427,6 +498,129 @@ function makeTargets<N extends number>(gl: WebGL2RenderingContext, n: N, w: numb
     out.push(t)
   }
   return out
+}
+
+interface Mrt {
+  fbo: WebGLFramebuffer
+  tex: WebGLTexture[]
+  w: number
+  h: number
+}
+interface CgfTargets {
+  a: Mrt
+  b: Mrt
+  coef: [Target, Target]
+}
+
+/** n RGBA16F textures behind one framebuffer (multiple render targets). */
+function createMrt(gl: WebGL2RenderingContext, w: number, h: number, n: number, wrap: number = gl.CLAMP_TO_EDGE): Mrt | null {
+  const tex: WebGLTexture[] = []
+  const fbo = gl.createFramebuffer()
+  if (!fbo) return null
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+  for (let i = 0; i < n; i++) {
+    const t = newTexture(gl)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0)
+    tex.push(t)
+  }
+  gl.drawBuffers(tex.map((_, i) => gl.COLOR_ATTACHMENT0 + i))
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  if (!ok) {
+    gl.deleteFramebuffer(fbo)
+    for (const t of tex) gl.deleteTexture(t)
+    return null
+  }
+  return { fbo, tex, w, h }
+}
+
+function deleteMrt(gl: WebGL2RenderingContext, m: Mrt | null | undefined) {
+  if (!m) return
+  gl.deleteFramebuffer(m.fbo)
+  for (const t of m.tex) gl.deleteTexture(t)
+}
+
+function deleteCgf(gl: WebGL2RenderingContext, c: CgfTargets | null) {
+  if (!c) return
+  deleteMrt(gl, c.a)
+  deleteMrt(gl, c.b)
+  deleteTargets(gl, c.coef)
+}
+
+/** Unmix pyramids: F (foreground donors) + ping-pong screen plate B, mipmapped. */
+interface UnmixTargets {
+  F: WebGLTexture
+  B: [WebGLTexture, WebGLTexture]
+  /** fbo[i] = F on attachment 0, B[i] on attachment 1 */
+  fbo: [WebGLFramebuffer, WebGLFramebuffer]
+  w: number
+  h: number
+  levels: number
+  format: 'rgba16f' | 'srgb8'
+  wrap: number
+}
+
+function deleteUnmix(gl: WebGL2RenderingContext, u: UnmixTargets | null) {
+  if (!u) return
+  for (const f of u.fbo) gl.deleteFramebuffer(f)
+  for (const t of [u.F, ...u.B]) gl.deleteTexture(t)
+}
+
+/**
+ * Allocate the unmix pyramids with immutable mip storage. RGBA16F needs renderable
+ * half floats; SRGB8_ALPHA8 is colour-renderable and mipmappable in core WebGL2 and
+ * its sRGB encoding keeps small premultiplied values precise. Returns null if the
+ * format can't be rendered to or mipmapped here.
+ */
+function createUnmix(gl: WebGL2RenderingContext, w: number, h: number, format: 'rgba16f' | 'srgb8', wrap: number): UnmixTargets | null {
+  const levels = Math.max(1, Math.min(5, Math.floor(Math.log2(Math.max(w, h))) + 1))
+  const internal = format === 'rgba16f' ? gl.RGBA16F : gl.SRGB8_ALPHA8
+  // Drain earlier errors so the probe below is ours (bounded: a lost context keeps
+  // reporting CONTEXT_LOST_WEBGL).
+  for (let i = 0; i < 8 && gl.getError() !== gl.NO_ERROR; i++) {
+    /* keep draining */
+  }
+  const mk = () => {
+    const t = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, t)
+    gl.texStorage2D(gl.TEXTURE_2D, levels, internal, w, h)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
+    return t
+  }
+  const F = mk()
+  const B: [WebGLTexture, WebGLTexture] = [mk(), mk()]
+  const fbo: WebGLFramebuffer[] = []
+  let ok = true
+  for (let i = 0; i < 2; i++) {
+    const f = gl.createFramebuffer()!
+    fbo.push(f)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, F, 0)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, B[i], 0)
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) ok = false
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  if (ok) {
+    // Mipmap generation must work too (it is what the final pass samples).
+    for (const t of [F, ...B]) {
+      gl.bindTexture(gl.TEXTURE_2D, t)
+      gl.generateMipmap(gl.TEXTURE_2D)
+    }
+    if (gl.getError() !== gl.NO_ERROR) ok = false
+  }
+  const u: UnmixTargets = { F, B, fbo: fbo as [WebGLFramebuffer, WebGLFramebuffer], w, h, levels, format, wrap }
+  if (!ok) {
+    deleteUnmix(gl, u)
+    return null
+  }
+  return u
 }
 
 interface Rect {
@@ -455,6 +649,9 @@ export class Compositor {
   private key: KeySettings = DEFAULT_KEY
   private me: MeTransform = { x: 0.5, y: 0.5, scale: 1 }
   private stickers: StickerDraw[] = []
+  /** C5: world front layer drawn over the Me layer, under stickers (cover-fit like the bg) */
+  private front: HTMLImageElement | ImageBitmap | null = null
+  private frontRaster: HTMLCanvasElement | null = null
   private stickerRasters = new Map<HTMLImageElement, HTMLCanvasElement>()
 
   // key model
@@ -468,6 +665,8 @@ export class Compositor {
   /** Drift-tracked key in Lab (EMA of clearly-background pixels). */
   private trackedLab: Lab
   private recalibrations = 0
+  /** robust border key (item 6): last status */
+  private borderStatus: BorderKeyStatus | null = null
   private readonly byteIndex = makeByteIndex(LUT_N)
 
   // mask (Magic Helper / segment mode)
@@ -482,7 +681,15 @@ export class Compositor {
   private mlWeight = 0
   private coreTarget = 0
   private coreWeight = 0
+  /** Magic Helper trust (helperTrust.ts) and garbage dilation (fraction of width) */
+  private mlTrust = 1
+  private mlDilate: number = KEYER_TUNING.dilate
   private outline = 0
+  /** P2 item 11: show the keyed layer over a checker instead of the background */
+  private checker = false
+  private seg: SegTuning = { ...SEG_TUNING }
+  private flags: KeyerFlags = { ...KEYER_FLAGS }
+  private cgfValid = false
 
   // pipeline state
   private matteIdx = 0
@@ -493,6 +700,14 @@ export class Compositor {
   private prepIdx = 0
   private prepValid = false
   private prepHasPrev = false
+  private unIdx = 0
+  private unValid = false
+  private unHasPrev = false
+  private dsValid = false
+  private gfHistIdx = 0
+  private gfHistHasPrev = false
+  /** the coefficients FINAL_ALPHA reads come from the history (item 5) this frame */
+  private gfHistValid = false
   private bgBlurDirty = true
   private bgBlurValid = false
   private lastSampleAt = 0
@@ -640,6 +855,7 @@ export class Compositor {
     this.matteDirty = true
     // A still preview (Teacher) renders once per change: don't blend in the old key.
     this.matteHasPrev = false
+    this.gfHistHasPrev = false
   }
 
   /** Legacy mask API (canvas/bitmap, R channel = person). Prefer setMaskData. */
@@ -681,6 +897,20 @@ export class Compositor {
   }
 
   /**
+   * Trust in the current Magic Helper mask, 0..1 (helperTrust.ts: mask age in camera
+   * frames, motion, model confidence). Low trust fades the core fill first, then the
+   * garbage kill. 1 (the default) behaves exactly like no trust model.
+   */
+  setMlTrust(t: number): void {
+    this.mlTrust = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 1
+  }
+
+  /** Garbage-matte dilation as a fraction of frame width (wider while the kid moves fast). */
+  setMlDilate(frac: number): void {
+    if (Number.isFinite(frac) && frac > 0) this.mlDilate = Math.min(0.15, frac)
+  }
+
+  /**
    * Let the Magic Helper's core matte fill in "definitely a kid" areas the key
    * removed (a screen-coloured shirt). Off by default: a loose or lagging mask
    * would otherwise paint bits of green screen back in around arms and necks.
@@ -688,6 +918,15 @@ export class Compositor {
    */
   setCoreFill(on: boolean): void {
     this.coreTarget = on ? 1 : 0
+  }
+
+  /**
+   * "Check the key" view for grown-ups: the keyed layer is drawn over a grey checker
+   * with one magenta band instead of the background, so holes, specks and green
+   * fringes are easy to see. WebGL2 only (the Canvas2D fallback ignores it).
+   */
+  setCheckerboard(on: boolean): void {
+    this.checker = !!on
   }
 
   /**
@@ -701,25 +940,92 @@ export class Compositor {
     this.matteDirty = true
   }
 
+  /**
+   * Harness / experiments: override AI cutout (segment mode) tuning. Unknown keys
+   * are ignored. Not part of the app API.
+   */
+  setSegTuning(t: Partial<Record<keyof SegTuning, number>>): void {
+    for (const [k, v] of Object.entries(t)) {
+      if (k in this.seg && typeof v === 'number' && Number.isFinite(v)) (this.seg as unknown as Record<string, number>)[k] = v
+    }
+    this.matteDirty = true
+    this.matteHasPrev = false
+    this.gfHistHasPrev = false
+  }
+
+  /**
+   * Harness / experiments: switch keyer features (KeyerFlags, 1 = on). Call before the
+   * first render(): target wrap modes are fixed when targets are allocated. Not part
+   * of the app API.
+   */
+  setKeyerFlags(f: Partial<Record<keyof KeyerFlags, number>>): void {
+    for (const [k, v] of Object.entries(f)) {
+      if (k in this.flags && typeof v === 'number' && Number.isFinite(v)) (this.flags as unknown as Record<string, number>)[k] = v
+    }
+    this.matteDirty = true
+    this.matteHasPrev = false
+    this.gfHistHasPrev = false
+  }
+
+  /** Item 5 runs the coefficient EMA (chroma mode, guided filter available). */
+  private gfTemporalOn(st: GlState): boolean {
+    return this.flags.gfTemporal > 0 && !!st.gfT && !!st.gfHist
+  }
+
+  /** Full-res matte EMA in chroma mode: lower while the coefficient EMA runs (item 5). */
+  private chromaMatteTemporal(st: GlState): number {
+    if (!this.gfTemporalOn(st)) return KEYER_TUNING.temporal
+    return this.flags.gfMatteT >= 0 ? this.flags.gfMatteT : GF_TEMPORAL_TUNING.matteTemporal
+  }
+
+  private unmixProj(): number {
+    return this.flags.unmixProj >= 0 ? this.flags.unmixProj : UNMIX_TUNING.proj
+  }
+
+  /** Wrap mode for filter targets (item 1). */
+  private edgeWrap(gl: WebGL2RenderingContext): number {
+    return this.flags.mirrorEdges > 0 ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE
+  }
+
   /** Segment-mode confidence ramp: a narrow window so the edge is crisp, not blobby. */
   private segRamp(): [number, number] {
-    const center = 0.5 + 0.22 * this.outline
-    return [center - 0.12, center + 0.12]
+    const center = this.seg.preCenter + 0.22 * this.outline
+    return [center - this.seg.preHalf, center + this.seg.preHalf]
+  }
+
+  /** Segment-mode ramp after the colour guided filter (the Outline control moves it too). */
+  private postRamp(): [number, number] {
+    const center = this.seg.postCenter + (this.seg.postHalf < 0.5 ? 0.15 * this.outline : 0)
+    return [center - this.seg.postHalf, center + this.seg.postHalf]
   }
 
   private chokeAmount(): number {
-    return KEYER_TUNING.choke * Math.pow(2, this.outline)
+    const base = this.key.mode === 'segment' ? this.seg.choke : this.flags.choke > 0 ? this.flags.choke : KEYER_TUNING.choke
+    return base * Math.pow(2, this.outline)
   }
 
   /** Forget matte history (camera switch, resize, tab hidden, context restored). */
   resetTemporal(): void {
     this.matteHasPrev = false
     this.prepHasPrev = false
+    this.unHasPrev = false
+    this.gfHistHasPrev = false
     this.matteDirty = true
   }
 
   setMe(t: MeTransform): void {
     this.me = { ...t }
+  }
+
+  /**
+   * C5 "TV front layer": a full-stage picture (desk, fence, bushes...) that is transparent
+   * except where it covers the child. Drawn after the keyed Me layer and before stickers,
+   * cover-fit exactly like the background so the two line up. Hidden in checker view.
+   */
+  setForegroundOverlay(img: HTMLImageElement | ImageBitmap | null): void {
+    if (img === this.front) return
+    this.front = img
+    this.frontRaster = null
   }
 
   setStickers(list: StickerDraw[]): void {
@@ -773,6 +1079,12 @@ export class Compositor {
       const d = ctx.getImageData(0, 0, sw, sh).data
       const band = Math.max(2, Math.round(Math.min(sw, sh) * 0.12))
       const samples: RGB[] = []
+      // Item 6: each sample also lands in one of 24 border cells (10 across the top,
+      // 7 down each side) so the key can be voted by position.
+      const nTop = BORDER_KEY.topCells
+      const nSide = BORDER_KEY.sideCells
+      const cellOf: number[] = []
+      const sideRows = Math.max(1, sh - 2 * band)
       // Top band + side bands only. Kids are cut off by the bottom edge, so a
       // screen-coloured shirt there would join the screen cluster, fake a
       // "patchy screen" (p95 up) and loosen the key until the shirt vanishes.
@@ -781,10 +1093,17 @@ export class Compositor {
           if (x >= band && x < sw - band && y >= band) continue
           const i = (y * sw + x) * 4
           samples.push([d[i] / 255, d[i + 1] / 255, d[i + 2] / 255])
+          const side = Math.min(nSide - 1, Math.floor(((y - band) * nSide) / sideRows))
+          cellOf.push(y < band ? Math.min(nTop - 1, Math.floor((x * nTop) / sw)) : x < band ? nTop + side : nTop + nSide + side)
         }
       }
-      const result = autoKeyFromSamples(samples)
-      if (!result) return null
+      const found = autoKeyFromSamples(samples)
+      if (!found) {
+        this.borderStatus = null
+        return null
+      }
+      const result = this.robustKey(samples, cellOf, found)
+      if (!result) return this.autoCal?.color ?? found.color
       this.autoCal = result
       // Same colour as now: setKey won't be called again, so apply thresholds here.
       if (sameColor(result.color, this.key.color)) this.updateThresholds()
@@ -793,6 +1112,42 @@ export class Compositor {
     } catch {
       return null // tainted cross-origin source
     }
+  }
+
+  /**
+   * Item 6: vote the key by border cell. Returns the auto-key to apply, or null to
+   * keep the current one (border covered / no clear majority with a key in use).
+   * Falls back to the plain cluster result when there is nothing better.
+   */
+  private robustKey(samples: RGB[], cellOf: number[], found: AutoKeyResult): AutoKeyResult | null {
+    if (this.flags.robustKey <= 0) {
+      this.borderStatus = null
+      return found
+    }
+    const nCells = BORDER_KEY.topCells + 2 * BORDER_KEY.sideCells
+    const all = new Array<number>(nCells).fill(0)
+    const scr: RGB[][] = Array.from({ length: nCells }, () => [])
+    samples.forEach((c, i) => {
+      all[cellOf[i]]++
+      if (isScreenLike(c)) scr[cellOf[i]].push(c)
+    })
+    // A cell counts only if most of it looks like backing (a hand or shirt edge in it is fine).
+    const cells: BorderCell[] = scr.map((list, i) => {
+      const mean = list.length >= 0.5 * all[i] ? averageLinear(list) : null
+      return mean ? { lab: rgbToLab(mean), n: list.length } : { lab: [0, 0, 0], n: 0 }
+    })
+    const prev = this.autoCal ? rgbToLab(this.autoCal.color) : null
+    const rb = robustBorderKey(cells, prev, {
+      kL: this.flags.bkKL > 0 ? this.flags.bkKL : undefined,
+      inlierDE: this.flags.bkDE > 0 ? this.flags.bkDE : undefined,
+    })
+    this.borderStatus = rb.status
+    if ((rb.status === 'ok' || rb.status === 'too-dark') && rb.inliers.length) {
+      if (rb.status === 'too-dark' && rb.key) this.onSignal?.({ type: 'dark', L: rb.key[0] })
+      return autoKeyFromScreen(rb.inliers.flatMap((i) => scr[i])) ?? found
+    }
+    // Covered / ambiguous: keep the key in use rather than jump to a shirt.
+    return prev ? null : found
   }
 
   /** Magic finger: normalized stage point -> average color of the fg pixels under it. */
@@ -847,8 +1202,11 @@ export class Compositor {
       hi: this.thresholds.hi,
       keyColor: labToRgb(this.trackedLab),
       autoKey: this.autoCal ? { p95: this.autoCal.p95, tooUneven: this.autoCal.tooUneven } : null,
+      borderKey: this.borderStatus,
       mlWeight: this.mlWeight,
       coreWeight: this.coreWeight,
+      mlTrust: this.mlTrust,
+      unmix: st && this.flags.unmix > 0 && (st.unmixFmt === 'rgba16f' || st.unmixFmt === 'srgb8') ? st.unmixFmt : 'off',
       maskAgeMs: performance.now() - this.maskAt,
       recalibrations: this.recalibrations,
       lastSample: this.lastSample,
@@ -899,6 +1257,7 @@ export class Compositor {
     this.glState = null
     this.ctx = null
     this.stickerRasters.clear()
+    this.front = this.frontRaster = null
   }
 
   // ---------- key model ----------
@@ -932,7 +1291,11 @@ export class Compositor {
 
   private resetPipeline() {
     this.matteValid = false
+    this.unValid = false
+    this.dsValid = false
     this.gfValid = false
+    this.gfHistValid = false
+    this.cgfValid = false
     this.prepValid = false
     this.bgBlurDirty = true
     this.bgBlurValid = false
@@ -990,30 +1353,43 @@ export class Compositor {
 
   private initGl(gl: WebGL2RenderingContext) {
     const image = link(gl, QUAD_VS, IMAGE_FS, { u_tex: 0 })
-    const fg = link(gl, QUAD_VS, FG_FS, { u_fg: 0, u_matte: 1, u_gfAB: 2, u_maskPrep: 3, u_bgBlur: 4 })
+    const fg = link(gl, QUAD_VS, FG_FS, { u_fg: 0, u_matte: 1, u_gfAB: 2, u_maskPrep: 3, u_bgBlur: 4, u_cgf: 5, u_unF: 6, u_unB: 7, u_dsMass: 9 })
+    const dsDown = link(gl, PASS_VS, DS_DOWN_FS, { u_matte: 0 })
+    const dsBox = link(gl, PASS_VS, DS_BOX_FS, { u_src: 0 })
+    const gfTemporal = link(gl, PASS_VS, GF_TEMPORAL_FS, { u_cur: 0, u_prev: 1 })
+    const checker = link(gl, PASS_VS, CHECKER_FS)
     const gfPack = link(gl, PASS_VS, GF_PACK_FS, { u_matte: 0 })
     const box = link(gl, PASS_VS, BOX_FS, { u_src: 0 })
     const gfCoef = link(gl, PASS_VS, GF_COEF_FS, { u_means: 0 })
     const maskPrep = link(gl, PASS_VS, MASK_PREP_FS, { u_mask: 0, u_prevPrep: 1 })
     const blurDown = link(gl, QUAD_VS, BLUR_DOWN_FS, { u_tex: 0 })
     const sample = link(gl, PASS_VS, SAMPLE_FS, { u_fg: 0, u_matte: 1, u_maskPrep: 2 })
-    const matteUnits = { u_fg: 0, u_mask: 1, u_prev: 2, u_keyLut: 3 }
+    const cgfPack = link(gl, PASS_VS, CGF_PACK_FS, { u_fg: 0, u_matte: 1 })
+    const box4 = link(gl, PASS_VS, BOX4_FS, { u_s0: 0, u_s1: 1, u_s2: 2, u_s3: 3 })
+    const boxR = link(gl, PASS_VS, BOXR_FS, { u_src: 0 })
+    const cgfCoef = link(gl, PASS_VS, CGF_COEF_FS, { u_m0: 0, u_m1: 1, u_m2: 2, u_m3: 3 })
+    const matteUnits = { u_fg: 0, u_mask: 1, u_prev: 2, u_keyLut: 3, u_plate: 4 }
+    // Unmix prep: never units 6/7 (where FG_FS binds the textures this pass writes).
+    const unmixUnits = { u_fg: 0, u_matte: 1, u_gfAB: 2, u_maskPrep: 3, u_prevB: 4, u_cgf: 5, u_keyLut: 8, u_dsMass: 9 }
 
     // The 3D LUT is core WebGL2, but keep the analytic shader as a safety net.
     let analytic = false
     let lutTex: WebGLTexture | null = gl.createTexture()
     let matte: Prog
+    let unmixPrep: Prog
     try {
       if (!lutTex) throw new Error('createTexture failed')
       uploadKeyLut(gl, lutTex, this.lutData, LUT_N)
       if (gl.getError() !== gl.NO_ERROR) throw new Error('RG8 3D texture upload failed')
       matte = link(gl, PASS_VS, matteFs(false), matteUnits)
+      unmixPrep = link(gl, PASS_VS, unmixPrepFs(false), unmixUnits)
     } catch (err) {
       console.warn('[Compositor] LUT key unavailable, using analytic key', err)
       if (lutTex) gl.deleteTexture(lutTex)
       lutTex = null
       analytic = true
       matte = link(gl, PASS_VS, matteFs(true), matteUnits)
+      unmixPrep = link(gl, PASS_VS, unmixPrepFs(true), unmixUnits)
     }
 
     const vao = gl.createVertexArray()
@@ -1048,6 +1424,21 @@ export class Compositor {
       maskPrep,
       blurDown,
       sample,
+      cgfPack,
+      box4,
+      boxR,
+      cgfCoef,
+      unmixPrep,
+      dsDown,
+      dsBox,
+      dsT: null,
+      gfTemporal,
+      checker,
+      gfHist: null,
+      unT: null,
+      unmixFmt: 'untried',
+      mrtOk: floatOk && (gl.getParameter(gl.MAX_DRAW_BUFFERS) as number) >= 4,
+      cgf: null,
       analytic,
       floatOk,
       bgTex: newTexture(gl),
@@ -1055,6 +1446,8 @@ export class Compositor {
       maskTex: newTexture(gl),
       lutTex,
       stickerTex: new Map(),
+      frontTex: newTexture(gl),
+      frontFor: null,
       matteT: null,
       gfT: null,
       prepT: null,
@@ -1069,18 +1462,22 @@ export class Compositor {
 
   private freeGl(st: GlState) {
     const { gl } = st
-    for (const p of [st.image, st.fg, st.matte, st.gfPack, st.box, st.gfCoef, st.maskPrep, st.blurDown, st.sample]) {
+    for (const p of [st.image, st.fg, st.matte, st.gfPack, st.box, st.gfCoef, st.maskPrep, st.blurDown, st.sample, st.cgfPack, st.box4, st.boxR, st.cgfCoef, st.unmixPrep, st.dsDown, st.dsBox, st.gfTemporal, st.checker]) {
       gl.deleteProgram(p.p)
     }
     gl.deleteBuffer(st.buffer)
     gl.deleteVertexArray(st.vao)
-    for (const t of [st.bgTex, st.fgTex, st.maskTex, ...st.stickerTex.values()]) gl.deleteTexture(t)
+    for (const t of [st.bgTex, st.fgTex, st.maskTex, st.frontTex, ...st.stickerTex.values()]) gl.deleteTexture(t)
     if (st.lutTex) gl.deleteTexture(st.lutTex)
     deleteTargets(gl, st.matteT)
     deleteTargets(gl, st.gfT)
     deleteTargets(gl, st.prepT)
     deleteTargets(gl, st.bgBlurT)
+    deleteTargets(gl, st.dsT)
+    deleteTargets(gl, st.gfHist)
     deleteTargets(gl, [st.sampleT])
+    deleteCgf(gl, st.cgf)
+    deleteUnmix(gl, st.unT)
     if (st.pending) gl.deleteSync(st.pending.fence)
     if (st.pbo) gl.deleteBuffer(st.pbo)
   }
@@ -1129,9 +1526,21 @@ export class Compositor {
     if (!st.matteT || st.matteT[0].w !== mw || st.matteT[0].h !== mh) {
       deleteTargets(gl, st.matteT)
       deleteTargets(gl, st.gfT)
-      st.matteT = makeTargets(gl, 2, mw, mh, false) as [Target, Target] | null
+      deleteTargets(gl, st.dsT)
+      deleteTargets(gl, st.gfHist)
+      st.gfHist = st.floatOk
+        ? (makeTargets(gl, 2, Math.ceil(mw / 2), Math.ceil(mh / 2), true, this.edgeWrap(gl)) as [Target, Target] | null)
+        : null
+      this.gfHistHasPrev = false
+      this.gfHistValid = false
+      // Box sums count area: clamp + the shader's off-frame rule, never mirrored (item 1).
+      st.dsT = makeTargets(gl, 2, Math.max(1, Math.ceil(mw / 4)), Math.max(1, Math.ceil(mh / 4)), st.floatOk) as [Target, Target] | null
+      this.dsValid = false
+      const wrap = this.edgeWrap(gl)
+      // P2 item 12: 16-bit history removes the 8-bit EMA residue (stuck values on still edges).
+      st.matteT = makeTargets(gl, 2, mw, mh, st.floatOk && this.flags.matte16 > 0, wrap) as [Target, Target] | null
       st.gfT = st.floatOk
-        ? (makeTargets(gl, 3, Math.ceil(mw / 2), Math.ceil(mh / 2), true) as [Target, Target, Target] | null)
+        ? (makeTargets(gl, 3, Math.ceil(mw / 2), Math.ceil(mh / 2), true, wrap) as [Target, Target, Target] | null)
         : null
       this.matteValid = false
       this.gfValid = false
@@ -1141,7 +1550,7 @@ export class Compositor {
     const ph = Math.max(1, Math.round((PREP_W * fh) / fw))
     if (!st.prepT || st.prepT[0].w !== pw || st.prepT[0].h !== ph) {
       deleteTargets(gl, st.prepT)
-      st.prepT = makeTargets(gl, 2, pw, ph, false) as [Target, Target] | null
+      st.prepT = makeTargets(gl, 2, pw, ph, false, this.edgeWrap(gl)) as [Target, Target] | null
       this.prepValid = false
       this.prepHasPrev = false
     }
@@ -1157,6 +1566,10 @@ export class Compositor {
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
       if (this.maskTexFormat !== 'r8' || this.maskTexSize.w !== w || this.maskTexSize.h !== h) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, data.subarray(0, w * h))
+        // The prep pass dilates / erodes with taps past the edge (item 1).
+        const wrap = this.edgeWrap(gl)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
         this.maskTexFormat = 'r8'
         this.maskTexSize = { w, h }
       } else {
@@ -1185,7 +1598,7 @@ export class Compositor {
     this.bind(gl, 0, st.maskTex)
     this.bind(gl, 1, prev.tex)
     gl.uniform1i(u.u_hasPrev, this.prepHasPrev && this.prepValid ? 1 : 0)
-    const step = KEYER_TUNING.dilate / 4
+    const step = (this.flags.helperTrust > 0 ? this.mlDilate : KEYER_TUNING.dilate) / 4
     gl.uniform2f(u.u_dilateStep, step, (step * fw) / fh)
     gl.uniform2f(u.u_texel, 1 / prep[cur].w, 1 / prep[cur].h)
     this.drawTo(gl, prep[cur])
@@ -1216,24 +1629,260 @@ export class Compositor {
     gl.uniform1i(u.u_hasPrev, this.matteHasPrev && this.matteValid ? 1 : 0)
     gl.uniform1f(u.u_lo, this.thresholds.lo)
     gl.uniform1f(u.u_hi, this.thresholds.hi)
-    gl.uniform1f(u.u_temporal, KEYER_TUNING.temporal)
+    gl.uniform1f(u.u_temporal, segment ? this.seg.temporal : this.chromaMatteTemporal(st))
     const [segLo, segHi] = this.segRamp()
     gl.uniform1f(u.u_segLo, segLo)
     gl.uniform1f(u.u_segHi, segHi)
     const fs = this.fg ? this.fg.size() : { w: 1, h: 1 }
     gl.uniform2f(u.u_ftexel, 1 / Math.max(1, fs.w), 1 / Math.max(1, fs.h))
+    gl.uniform1i(u.u_ratioGuard, this.flags.ratioGuard > 0 ? 1 : 0)
     if (st.analytic) {
       const k = this.keyLab
       gl.uniform3f(u.u_keyLab, k.L, k.a, k.b)
       gl.uniform2f(u.u_keyDirAB, k.dirA, k.dirB)
       gl.uniform1f(u.u_keyC, k.C)
     }
+    // Item 7: flatten the screen with the previous frame's plate (chroma + unmix plate only).
+    const plate = !segment && this.flags.flatten > 0 && this.flags.unmix > 0 && this.unValid && st.unT ? st.unT : null
+    this.bind(gl, 4, plate ? plate.B[this.unIdx] : null)
+    gl.uniform1i(u.u_hasPlate, plate ? 1 : 0)
+    gl.uniform1f(u.u_flatten, this.flags.flatten)
+    if (plate) {
+      const lod = this.flags.flattenLod >= 0 ? this.flags.flattenLod : FLATTEN_TUNING.lod
+      gl.uniform1f(u.u_plateLod, Math.min(lod, plate.levels - 2))
+      const k = labToRgb([this.keyLab.L, this.keyLab.a, this.keyLab.b])
+      gl.uniform3f(u.u_keyLin, srgbToLinear(k[0]), srgbToLinear(k[1]), srgbToLinear(k[2]))
+    }
     this.drawTo(gl, mt[cur])
+    this.bind(gl, 4, null)
+    gl.activeTexture(gl.TEXTURE0)
     this.matteIdx = cur
     this.matteValid = true
     this.matteHasPrev = true
     this.matteDirty = false
-    this.runGuidedFilter(st)
+    if (!segment && (this.flags.despeckle > 0 || this.flags.holeFill > 0)) this.runDespeckle(st)
+    else this.dsValid = false
+    if (segment && this.seg.colorGF > 0 && this.runColorGuidedFilter(st)) {
+      this.gfValid = false
+      this.gfHistValid = false
+    } else {
+      this.cgfValid = false
+      this.runGuidedFilter(st)
+    }
+    if (!segment && this.flags.unmix > 0) this.runUnmixPrep(st)
+    else this.unValid = false
+  }
+
+  /** Shared uniforms of FINAL_ALPHA_GLSL (FG_FS and the unmix prep). */
+  private setAlphaUniforms(st: GlState, u: Uniforms, mode: KeySettings['mode']) {
+    const { gl } = st
+    const mt = st.matteT
+    gl.uniform1i(u.u_mode, MODE_IDS[mode])
+    gl.uniform1i(u.u_hasGF, this.gfValid && st.gfT ? 1 : 0)
+    const cgf = mode === 'segment' && this.cgfValid && st.cgf
+    gl.uniform1i(u.u_hasCGF, cgf ? 1 : 0)
+    const [postLo, postHi] = this.postRamp()
+    gl.uniform2f(u.u_post, postLo, postHi)
+    gl.uniform2f(u.u_mtexel, mt ? 1 / mt[0].w : 0, mt ? 1 / mt[0].h : 0)
+    const ml = mode === 'chroma' && this.prepValid ? this.mlWeight : 0
+    gl.uniform1f(u.u_mlWeight, ml)
+    gl.uniform1f(u.u_mlTrust, this.flags.helperTrust > 0 ? this.mlTrust : 1)
+    gl.uniform1f(u.u_coreWeight, this.coreWeight)
+    gl.uniform1f(u.u_choke, this.chokeAmount())
+    const ds = mode === 'chroma' && this.dsValid && st.dsT && mt
+    gl.uniform1i(u.u_hasDs, ds ? 1 : 0)
+    const area = mt ? mt[0].w * mt[0].h : 0
+    const minArea = this.flags.dsMinArea >= 0 ? this.flags.dsMinArea : DS_TUNING.minArea
+    const minHole = this.flags.dsMinHole >= 0 ? this.flags.dsMinHole : DS_TUNING.minHole
+    gl.uniform1f(u.u_dsMinArea, this.flags.despeckle > 0 ? minArea * area : 0)
+    gl.uniform1f(u.u_dsMinHole, this.flags.holeFill > 0 ? minHole * area : 0)
+  }
+
+  /** Bind the FINAL_ALPHA_GLSL inputs to units 1, 2, 3, 5. */
+  private bindAlphaInputs(st: GlState, mode: KeySettings['mode']) {
+    const { gl } = st
+    const mt = st.matteT
+    this.bind(gl, 1, mt ? mt[this.matteIdx].tex : null)
+    const coef = this.gfHistValid && st.gfHist ? st.gfHist[this.gfHistIdx].tex : st.gfT ? st.gfT[1].tex : null
+    this.bind(gl, 2, coef)
+    this.bind(gl, 3, st.prepT ? st.prepT[this.prepIdx].tex : null)
+    const cgf = mode === 'segment' && this.cgfValid && st.cgf ? st.cgf : null
+    this.bind(gl, 5, cgf ? cgf.coef[0].tex : null)
+    this.bind(gl, 9, mode === 'chroma' && this.dsValid && st.dsT ? st.dsT[0].tex : null)
+  }
+
+  /**
+   * Speck removal + hole fill (item 4): child / screen coverage per 4x4 matte cell,
+   * then a 17-cell box mean H and V. FINAL_ALPHA_GLSL reads the result. Fresh camera
+   * frames only (runs inside the matte branch).
+   */
+  private runDespeckle(st: GlState) {
+    const { gl } = st
+    const d = st.dsT
+    const mt = st.matteT
+    if (!d || !mt) {
+      this.dsValid = false
+      return
+    }
+    gl.disable(gl.BLEND)
+    this.bind(gl, 9, null) // feedback-loop rule: never bound while being written
+    gl.useProgram(st.dsDown.p)
+    this.bind(gl, 0, mt[this.matteIdx].tex)
+    gl.uniform2f(st.dsDown.u.u_mtexel, 1 / mt[0].w, 1 / mt[0].h)
+    this.drawTo(gl, d[0])
+    gl.useProgram(st.dsBox.p)
+    this.bind(gl, 0, d[0].tex)
+    gl.uniform2f(st.dsBox.u.u_step, 1 / d[0].w, 0)
+    this.drawTo(gl, d[1])
+    this.bind(gl, 0, d[1].tex)
+    gl.uniform2f(st.dsBox.u.u_step, 0, 1 / d[0].h)
+    this.drawTo(gl, d[0])
+    this.dsValid = true
+  }
+
+  /**
+   * Foreground unmixing prep (item 3): local foreground donors F̂ and the screen
+   * plate B̂ at 1/4 matte resolution, then mipmaps. Runs inside the matte branch,
+   * i.e. once per camera frame, so the plate's learn / decay rates are per frame.
+   */
+  private runUnmixPrep(st: GlState) {
+    const { gl } = st
+    const mt = st.matteT
+    if (!mt || st.unmixFmt === 'off') {
+      this.unValid = false
+      return
+    }
+    const w = Math.max(1, Math.ceil(mt[0].w / 4))
+    const h = Math.max(1, Math.ceil(mt[0].h / 4))
+    const wrap = this.edgeWrap(gl)
+    const wantSrgb = this.flags.unmixSrgb8 > 0 || !st.floatOk
+    const want: 'rgba16f' | 'srgb8' = wantSrgb ? 'srgb8' : 'rgba16f'
+    let u = st.unT
+    if (!u || u.w !== w || u.h !== h || u.wrap !== wrap || (st.unmixFmt === 'untried' && u.format !== want)) {
+      deleteUnmix(gl, u)
+      st.unT = null
+      u = (want === 'rgba16f' ? createUnmix(gl, w, h, 'rgba16f', wrap) : null) ?? createUnmix(gl, w, h, 'srgb8', wrap)
+      if (!u) {
+        st.unmixFmt = 'off'
+        this.unValid = false
+        return
+      }
+      st.unT = u
+      st.unmixFmt = u.format
+      this.unHasPrev = false
+    }
+    const cur = 1 - this.unIdx
+    gl.disable(gl.BLEND)
+    gl.useProgram(st.unmixPrep.p)
+    const pu = st.unmixPrep.u
+    // Feedback-loop rule: nothing this pass writes may be bound to a unit it samples.
+    // FG_FS binds F / B on units 6 and 7; clear them, then bind only the previous B.
+    this.bind(gl, 6, null)
+    this.bind(gl, 7, null)
+    this.bind(gl, 0, st.fgTex)
+    this.bindAlphaInputs(st, 'chroma')
+    this.bind(gl, 4, u.B[this.unIdx])
+    this.bind(gl, 8, st.lutTex, gl.TEXTURE_3D)
+    this.setAlphaUniforms(st, pu, 'chroma')
+    const hasPrev = this.unHasPrev && this.unValid
+    gl.uniform1i(pu.u_hasPrevB, hasPrev ? 1 : 0)
+    gl.uniform1f(pu.u_plateRate, hasPrev ? UNMIX_TUNING.plateRate : 1)
+    gl.uniform1f(pu.u_plateDecay, UNMIX_TUNING.plateDecay)
+    gl.uniform1f(pu.u_lo, this.thresholds.lo)
+    gl.uniform1f(pu.u_hi, this.thresholds.hi)
+    gl.uniform2f(pu.u_ptexel, 1 / w, 1 / h)
+    gl.uniform1i(pu.u_taps, (this.flags.unmixTaps > 0 ? this.flags.unmixTaps : UNMIX_TUNING.prepTaps) === 1 ? 1 : 4)
+    gl.uniform1f(pu.u_helperDonors, this.flags.flattenHelperDonors > 0 ? 1 : 0)
+    gl.uniform2f(pu.u_keyHueDir, this.keyLab.dirA, this.keyLab.dirB)
+    if (st.analytic) {
+      const k = this.keyLab
+      gl.uniform3f(pu.u_keyLab, k.L, k.a, k.b)
+      gl.uniform2f(pu.u_keyDirAB, k.dirA, k.dirB)
+      gl.uniform1f(pu.u_keyC, k.C)
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, u.fbo[cur])
+    gl.viewport(0, 0, w, h)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    this.bind(gl, 4, null)
+    this.bind(gl, 8, null, gl.TEXTURE_3D)
+    for (const t of [u.F, u.B[cur]]) {
+      gl.bindTexture(gl.TEXTURE_2D, t)
+      gl.generateMipmap(gl.TEXTURE_2D)
+    }
+    gl.activeTexture(gl.TEXTURE0)
+    this.unIdx = cur
+    this.unValid = true
+    this.unHasPrev = true
+  }
+
+  /**
+   * Colour guided filter for the AI cutout at a small working size: pack (MRT) →
+   * box² → coefficients → box². The fg pass applies a·I + b at full resolution.
+   * Returns false when MRT / float targets are unavailable (luma filter instead).
+   */
+  private runColorGuidedFilter(st: GlState): boolean {
+    const { gl } = st
+    const mt = st.matteT
+    if (!st.mrtOk || !mt) return false
+    const gw = Math.max(16, Math.min(mt[0].w, Math.round(this.seg.gfW)))
+    const gh = Math.max(9, Math.round((gw * mt[0].h) / mt[0].w))
+    if (!st.cgf || st.cgf.a.w !== gw || st.cgf.a.h !== gh) {
+      deleteCgf(gl, st.cgf)
+      st.cgf = null
+      // Clamp, not mirrored: mirroring here scored slightly worse on `classroom` (item 1).
+      const a = createMrt(gl, gw, gh, 4)
+      const b = createMrt(gl, gw, gh, 4)
+      const coef = makeTargets(gl, 2, gw, gh, true) as [Target, Target] | null
+      if (!a || !b || !coef) {
+        deleteMrt(gl, a)
+        deleteMrt(gl, b)
+        deleteTargets(gl, coef)
+        st.mrtOk = false
+        return false
+      }
+      st.cgf = { a, b, coef }
+    }
+    const { a, b, coef } = st.cgf
+    const r = Math.max(1, Math.min(16, Math.round(this.seg.gfRadius)))
+    gl.disable(gl.BLEND)
+    gl.viewport(0, 0, gw, gh)
+    // pack
+    gl.useProgram(st.cgfPack.p)
+    this.bind(gl, 0, st.fgTex)
+    this.bind(gl, 1, mt[this.matteIdx].tex)
+    gl.uniform2f(st.cgfPack.u.u_otexel, 1 / gw, 1 / gh)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    // box: a -> (H) -> b -> (V) -> a
+    gl.useProgram(st.box4.p)
+    gl.uniform1i(st.box4.u.u_radius, r)
+    for (const [src, dst, step] of [
+      [a, b, [1 / gw, 0]],
+      [b, a, [0, 1 / gh]],
+    ] as const) {
+      for (let i = 0; i < 4; i++) this.bind(gl, i, src.tex[i])
+      gl.uniform2f(st.box4.u.u_step, step[0], step[1])
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    }
+    // coefficients -> coef[0], then box -> coef[1] -> coef[0]
+    gl.useProgram(st.cgfCoef.p)
+    for (let i = 0; i < 4; i++) this.bind(gl, i, a.tex[i])
+    gl.uniform1f(st.cgfCoef.u.u_eps, this.seg.gfEps)
+    this.drawTo(gl, coef[0])
+    gl.useProgram(st.boxR.p)
+    gl.uniform1i(st.boxR.u.u_radius, r)
+    this.bind(gl, 0, coef[0].tex)
+    gl.uniform2f(st.boxR.u.u_step, 1 / gw, 0)
+    this.drawTo(gl, coef[1])
+    this.bind(gl, 0, coef[1].tex)
+    gl.uniform2f(st.boxR.u.u_step, 0, 1 / gh)
+    this.drawTo(gl, coef[0])
+    for (let i = 1; i < 4; i++) this.bind(gl, i, null)
+    gl.activeTexture(gl.TEXTURE0)
+    this.cgfValid = true
+    return true
   }
 
   /** Fast guided filter at half res: pack → box² → coefficients → box². */
@@ -1256,6 +1905,31 @@ export class Compositor {
     this.drawTo(gl, t1)
     this.boxBlur(st, t1, t2)
     this.gfValid = true
+    // Item 5: EMA the coefficients (only here, i.e. once per camera frame).
+    const hist = st.gfHist
+    // Chroma only: in segment mode without the colour GF the luma GF keeps today's path.
+    if (hist && this.gfTemporalOn(st) && this.key.mode === 'chroma') {
+      const cur = 1 - this.gfHistIdx
+      // Unit 2 may still hold a history texture from the last draw: clear it first.
+      this.bind(gl, 2, null)
+      gl.useProgram(st.gfTemporal.p)
+      const u = st.gfTemporal.u
+      this.bind(gl, 0, t1.tex)
+      this.bind(gl, 1, hist[this.gfHistIdx].tex)
+      gl.uniform1i(u.u_hasPrev, this.gfHistHasPrev && this.gfHistValid ? 1 : 0)
+      gl.uniform1f(u.u_cTemporal, this.flags.gfCT >= 0 ? this.flags.gfCT : GF_TEMPORAL_TUNING.cTemporal)
+      const g = this.flags.gfGuard
+      gl.uniform2f(u.u_guard, g > 0 ? g / 4 : GF_TEMPORAL_TUNING.guardLo, g > 0 ? g : GF_TEMPORAL_TUNING.guardHi)
+      this.drawTo(gl, hist[cur])
+      this.bind(gl, 1, null)
+      gl.activeTexture(gl.TEXTURE0)
+      this.gfHistIdx = cur
+      this.gfHistValid = true
+      this.gfHistHasPrev = true
+    } else {
+      this.gfHistValid = false
+      this.gfHistHasPrev = false
+    }
   }
 
   /** Separable box radius 4: a → (H) → b → (V) → a. Result ends in `a`. */
@@ -1337,25 +2011,29 @@ export class Compositor {
     gl.useProgram(st.fg.p)
     this.setQuad(gl, u, rect, 0, stageW, stageH)
     this.bind(gl, 0, st.fgTex)
-    this.bind(gl, 1, mt ? mt[this.matteIdx].tex : null)
-    this.bind(gl, 2, st.gfT ? st.gfT[1].tex : null)
-    this.bind(gl, 3, st.prepT ? st.prepT[this.prepIdx].tex : null)
+    this.bindAlphaInputs(st, mode)
     this.bind(gl, 4, st.bgBlurT ? st.bgBlurT[0].tex : null)
-    gl.uniform1i(u.u_mode, MODE_IDS[mode])
+    // The matte output needs the pyramids too when item 16 changes alpha with them.
+    const un = mode === 'chroma' && (!matteOut || this.flags.projAlpha > 0) && this.flags.unmix > 0 && this.unValid && st.unT ? st.unT : null
+    this.bind(gl, 6, un ? un.F : null)
+    this.bind(gl, 7, un ? un.B[this.unIdx] : null)
+    gl.uniform1i(u.u_hasUnmix, un ? 1 : 0)
+    gl.uniform1f(u.u_unmix, UNMIX_TUNING.strength)
+    gl.uniform1f(u.u_unCap, this.flags.unmixCap >= 0 ? this.flags.unmixCap : UNMIX_TUNING.cap)
+    gl.uniform1f(u.u_unSpillKeep, this.flags.unmixSpillKeep >= 0 ? this.flags.unmixSpillKeep : UNMIX_TUNING.spillKeep)
+    gl.uniform1f(u.u_unProj, this.unmixProj())
+    gl.uniform1f(u.u_projAlpha, Math.max(0, this.flags.projAlpha))
+    gl.uniform1i(u.u_projWide, this.flags.projAlphaWide > 0 ? 1 : 0)
+    gl.uniform1f(u.u_projTaper, Math.max(0, this.flags.projTaper))
+    this.setAlphaUniforms(st, u, mode)
     gl.uniform1i(u.u_mirror, matteOut ? 0 : this.mirror ? 1 : 0)
     gl.uniform1i(u.u_matteOut, matteOut ? 1 : 0)
     gl.uniform1i(u.u_hasMatte, keyed && this.matteValid && mt ? 1 : 0)
-    gl.uniform1i(u.u_hasGF, this.gfValid && st.gfT ? 1 : 0)
-    gl.uniform1i(u.u_hasBgBlur, !matteOut && this.bgBlurValid ? 1 : 0)
+    gl.uniform1i(u.u_hasBgBlur, !matteOut && !this.checker && this.bgBlurValid ? 1 : 0)
     const ts = fg.size()
     gl.uniform2f(u.u_texel, 1 / Math.max(1, ts.w), 1 / Math.max(1, ts.h))
-    gl.uniform2f(u.u_mtexel, mt ? 1 / mt[0].w : 0, mt ? 1 / mt[0].h : 0)
-    const ml = mode === 'chroma' && this.prepValid ? this.mlWeight : 0
-    gl.uniform1f(u.u_mlWeight, ml)
-    gl.uniform1f(u.u_coreWeight, this.coreWeight)
-    gl.uniform1f(u.u_choke, this.chokeAmount())
     gl.uniform1f(u.u_spill, mode === 'chroma' ? Math.min(1, Math.max(0, this.key.spill)) : 0)
-    gl.uniform1f(u.u_wrap, KEYER_TUNING.wrap)
+    gl.uniform1f(u.u_wrap, mode === 'segment' ? this.seg.wrap : KEYER_TUNING.wrap)
     gl.uniform1i(u.u_spillCh, this.spillCh)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     gl.activeTexture(gl.TEXTURE0)
@@ -1385,7 +2063,11 @@ export class Compositor {
 
     // Background: opaque cover-fit, no blending needed.
     gl.disable(gl.BLEND)
-    if (this.bg && bgOk) {
+    if (this.checker) {
+      gl.useProgram(st.checker.p)
+      gl.uniform2f(st.checker.u.u_stage, W, H)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    } else if (this.bg && bgOk) {
       const s = this.bg.size()
       gl.useProgram(st.image.p)
       this.bind(gl, 0, st.bgTex)
@@ -1398,6 +2080,14 @@ export class Compositor {
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
     const rect = this.fgRect()
     if (rect && fgOk) this.drawFg(st, rect, W, H, false)
+
+    const front = this.checker ? null : this.frontTexture(st)
+    if (front) {
+      gl.useProgram(st.image.p)
+      this.bind(gl, 0, front.tex)
+      this.setQuad(gl, st.image.u, this.bgRect(front.w, front.h), 0, W, H)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    }
 
     if (this.stickers.length) {
       gl.useProgram(st.image.p)
@@ -1414,6 +2104,32 @@ export class Compositor {
     gl.disable(gl.BLEND)
 
     if (fgOk) this.driftTick(st)
+  }
+
+  /** Upload the front layer once per image (and again after a context restore). */
+  private frontTexture(st: GlState): { tex: WebGLTexture; w: number; h: number } | null {
+    const img = this.front
+    if (!img || !isReady(img as Drawable)) return null
+    const src = this.frontSource(img)
+    if (st.frontFor !== img) {
+      const { gl } = st
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, st.frontTex)
+      try {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src)
+      } catch {
+        return null
+      }
+      st.frontFor = img
+    }
+    return { tex: st.frontTex, w: src.width, h: src.height }
+  }
+
+  /** SVG images go through a canvas so Safari uploads them at their full raster size. */
+  private frontSource(img: HTMLImageElement | ImageBitmap): HTMLCanvasElement | ImageBitmap {
+    if (!isImage(img)) return img
+    this.frontRaster ??= rasterize(img)
+    return this.frontRaster
   }
 
   private stickerTexture(st: GlState, img: HTMLImageElement | ImageBitmap): WebGLTexture | null {
@@ -1692,6 +2408,11 @@ export class Compositor {
       if (this.mirror) ctx.scale(-1, 1)
       this.safeDraw(ctx, layer, { cx: 0, cy: 0, w: rect.w, h: rect.h })
       ctx.restore()
+    }
+
+    if (this.front && !this.checker && isReady(this.front as Drawable)) {
+      const src = this.frontSource(this.front)
+      this.safeDraw(ctx, src, this.bgRect(src.width, src.height))
     }
 
     for (const s of this.stickers) {

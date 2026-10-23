@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Footage Preview</title>
+    <style>
+      :root { --bg: #fff3cf; --ink: #1e3a8a; }
+      body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink); font: 16px/1.4 system-ui, sans-serif; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+      figure { margin: 0; background: #fff; border-radius: 16px; padding: 8px; }
+      video, img { width: 100%; aspect-ratio: 16 / 9; display: block; border-radius: 10px; background: #000; object-fit: cover; }
+      figcaption { font-size: 13px; padding-top: 6px; white-space: pre-line; }
+    </style>
+  </head>
+  <body>
+    <!-- Dev-only fixture: previews the real-footage worlds in web/public/worlds/.
+         Served by Vite (e.g. npx vite --port 5402) at /e2e/fixtures/footage-preview.html.
+         Each tile is a <video muted loop playsinline autoplay> exactly like the app's video world. -->
+    <h1>Real places: footage preview</h1>
+    <div class="grid" id="grid"></div>
+    <script type="module">
+      const IDS = ['ocean', 'earth', 'waterfall', 'fish']
+      const grid = document.getElementById('grid')
+      const report = {}
+      window.__footage = report
+      for (const id of IDS) {
+        const fig = document.createElement('figure')
+        const v = document.createElement('video')
+        v.muted = true
+        v.loop = true
+        v.playsInline = true
+        v.autoplay = true
+        v.setAttribute('muted', '')
+        v.setAttribute('playsinline', '')
+        v.preload = 'auto'
+        v.poster = `/worlds/${id}.jpg`
+        v.dataset.id = id
+        const cap = document.createElement('figcaption')
+        const r = (report[id] = { id, loops: 0, maxTime: 0, error: null, playing: false })
+        let last = 0
+        v.addEventListener('loadedmetadata', () => {
+          r.duration = v.duration
+          r.width = v.videoWidth
+          r.height = v.videoHeight
+        })
+        v.addEventListener('playing', () => (r.playing = true))
+        v.addEventListener('error', () => (r.error = v.error ? `${v.error.code} ${v.error.message}` : 'error'))
+        v.addEventListener('timeupdate', () => {
+          if (v.currentTime + 0.5 < last) r.loops++
+          last = v.currentTime
+          r.maxTime = Math.max(r.maxTime, v.currentTime)
+          // Audio presence: WebKit exposes audioTracks; Chromium/Firefox expose mozHasAudio/webkitAudioDecodedByteCount.
+          r.audioTracks = v.audioTracks ? v.audioTracks.length : null
+          r.audioBytes = 'webkitAudioDecodedByteCount' in v ? v.webkitAudioDecodedByteCount : null
+          cap.textContent = `${id}  ${r.width}x${r.height}  ${(r.duration ?? 0).toFixed(2)}s\nt=${v.currentTime.toFixed(2)} loops=${r.loops}`
+        })
+        v.src = `/worlds/${id}.mp4`
+        v.play().catch((e) => (r.playError = String(e)))
+        const img = document.createElement('img')
+        img.src = `/worlds/${id}.jpg`
+        img.alt = `${id} poster`
+        img.addEventListener('load', () => {
+          r.posterW = img.naturalWidth
+          r.posterH = img.naturalHeight
+        })
+        fig.append(v, cap, img)
+        grid.append(fig)
+      }
+    </script>
+  </body>
+</html>

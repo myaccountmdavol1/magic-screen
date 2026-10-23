@@ -14,8 +14,14 @@ export interface RecordingResult {
 
 export interface RecordingHandle {
   stop(): Promise<RecordingResult>
-  /** Seconds since recording started. */
+  /** Seconds since the recorder really started (0 until then). */
   elapsed(): number
+  /**
+   * Resolves once the MediaRecorder has really started capturing (its 'start' event),
+   * or after a short fallback timeout. The UI keeps the countdown up until then so
+   * there is never a dead gap where the child thinks it is filming but it isn't.
+   */
+  started: Promise<void>
 }
 
 export interface StartRecordingOptions {
@@ -82,34 +88,61 @@ function finishTrack(t: Track): Promise<void> {
   return Promise.resolve()
 }
 
+const START_FALLBACK_MS = 1500
+
 export function startRecording({ canvas, audio }: StartRecordingOptions): RecordingHandle {
   const mime = pickVideoMime()
   const canvasStream = canvas.captureStream(30)
   const composite = new MediaStream([...canvasStream.getVideoTracks(), ...(audio?.getAudioTracks() ?? [])])
-  const main = makeTrack(composite, mime)
+  let main: Track
+  try {
+    main = makeTrack(composite, mime)
+    // 1s timeslices so a crash/kill mid-recording still leaves usable chunks.
+    main.recorder.start(1000)
+  } catch (err) {
+    // The caller shows "Try again"; don't leave the canvas capture track running.
+    for (const t of canvasStream.getTracks()) t.stop()
+    throw err
+  }
 
-  const startedAt = performance.now()
-  // 1s timeslices so a crash/kill mid-recording still leaves usable chunks.
-  main.recorder.start(1000)
+  let startedAt: number | null = null
+  const started = new Promise<void>((resolve) => {
+    const mark = () => {
+      if (startedAt == null) startedAt = performance.now()
+      resolve()
+    }
+    main.recorder.addEventListener('start', mark, { once: true })
+    // Some engines are slow (or silent) to fire 'start'; never hang the UI on it.
+    setTimeout(mark, START_FALLBACK_MS)
+  })
 
   let stopping: Promise<RecordingResult> | null = null
   let stoppedAt: number | null = null
 
   return {
+    started,
     elapsed() {
-      return ((stoppedAt ?? performance.now()) - startedAt) / 1000
+      if (startedAt == null) return 0
+      return Math.max(0, ((stoppedAt ?? performance.now()) - startedAt) / 1000)
     },
     stop() {
       if (stopping) return stopping
-      stoppedAt = performance.now()
+      const stopAt = performance.now()
+      stoppedAt = stopAt
+      if (startedAt == null) startedAt = stopAt
+      const startAt = startedAt
       stopping = finishTrack(main).then(() => {
         // The canvas capture track is ours; camera/mic tracks belong to the caller.
         for (const t of canvasStream.getTracks()) t.stop()
         const outMime = baseMime(main.recorder.mimeType || mime, 'video/webm')
+        const composite = new Blob(main.chunks, { type: outMime })
+        // No data at all (the recorder never got a frame): an empty file would sit in the
+        // gallery as a movie that never plays. The caller shows "Oops! Try again." instead.
+        if (composite.size === 0) throw new Error('The recording is empty.')
         return {
-          composite: new Blob(main.chunks, { type: outMime }),
+          composite,
           mime: outMime,
-          durationSec: (stoppedAt! - startedAt) / 1000,
+          durationSec: (stopAt - startAt) / 1000,
         }
       })
       return stopping
@@ -245,6 +278,31 @@ export function fileNameFor(filename: string, mime: string): string {
   if (!ext) return filename
   const stem = filename.replace(/\.[a-z0-9]{2,5}$/i, '')
   return `${stem}.${ext}`
+}
+
+let persistAsked = false
+
+/**
+ * Ask the browser to keep the on-device gallery even under storage pressure (Safari
+ * otherwise may evict it after 7 days without a visit). Called on the first save;
+ * never throws, never blocks the save. Resolves true when storage is (now) persistent.
+ */
+export async function requestPersistentStorage(): Promise<boolean> {
+  if (persistAsked) return false
+  persistAsked = true
+  try {
+    const sm = typeof navigator !== 'undefined' ? navigator.storage : undefined
+    if (!sm?.persist) return false
+    if (sm.persisted && (await sm.persisted())) return true
+    return await sm.persist()
+  } catch {
+    return false
+  }
+}
+
+/** Test hook: forget that persist() was already asked this session. */
+export function resetPersistRequestForTests() {
+  persistAsked = false
 }
 
 /**

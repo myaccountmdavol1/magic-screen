@@ -147,3 +147,26 @@ export async function keepToHome(page: Page, count: number) {
   await expect(page.getByRole('button', { name: /Let's make!/ })).toBeVisible()
   await expect(page.locator('.gallery-grid .creation-tile:not(.skeleton)')).toHaveCount(count)
 }
+
+/** Press and hold a hold-to-unlock button (Home gear, Me "Grown-up fix") for 2s+. */
+export async function holdButton(page: Page, name: string | RegExp, ms = 2400) {
+  const btn = page.getByRole('button', { name })
+  await expect(btn).toBeVisible()
+  // hover() waits for the button to stop moving (screen entrance animation), then parks the mouse on it.
+  await btn.hover()
+  await page.mouse.down()
+  await page.waitForTimeout(ms)
+  await page.mouse.up()
+}
+
+/** From Home: hold the gear, answer the multiplication question, land on Teacher settings. */
+export async function openTeacher(page: Page) {
+  await holdButton(page, /Teacher settings\. Press and hold/)
+  const gate = page.getByRole('dialog', { name: 'Grown-ups only' })
+  await expect(gate).toBeVisible()
+  const m = (await gate.locator('.gate-question').innerText()).match(/(\d+)\s*×\s*(\d+)/)
+  expect(m).not.toBeNull()
+  for (const d of String(Number(m![1]) * Number(m![2]))) await gate.getByRole('button', { name: d, exact: true }).click()
+  await gate.getByRole('button', { name: 'Check answer' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: 'Teacher settings' })).toBeVisible()
+}

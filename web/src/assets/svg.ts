@@ -102,6 +102,26 @@ export function getStickerImage(id: string): Promise<HTMLImageElement> {
 export function preloadBuiltinAssets(): Promise<void> {
   return Promise.allSettled([
     ...BUILTIN_BACKGROUNDS.map((b) => getBackgroundImage(b.id)),
+    ...BUILTIN_BACKGROUNDS.filter((b) => b.front).map((b) => getFrontImage(b.id)),
     ...STICKERS.map((s) => getStickerImage(s.id)),
   ]).then(() => undefined)
+}
+
+// ---- world front layers (ease-of-use C5) -----------------------------------
+
+/** Data URL for a world's front layer (desk, fence...), or undefined if it has none. */
+export function getFrontUrl(id: string): string | undefined {
+  const key = `fr:${id}`
+  const hit = urlCache.get(key)
+  if (hit) return hit
+  const def = BUILTIN_BACKGROUNDS.find((b) => b.id === id)
+  if (!def?.front) return undefined
+  const url = svgToDataUrl(withSvgSize(def.front, BACKGROUND_SIZE.width, BACKGROUND_SIZE.height))
+  urlCache.set(key, url)
+  return url
+}
+
+/** Decoded 1920x1080 front layer of a built-in world, cached per id (rejects if none). */
+export function getFrontImage(id: string): Promise<HTMLImageElement> {
+  return cachedImage(`fr:${id}`, getFrontUrl(id), BACKGROUND_SIZE.width, BACKGROUND_SIZE.height)
 }

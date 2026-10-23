@@ -60,6 +60,8 @@ export interface CaptureResult {
   mime: string
   durationSec?: number
   thumbDataUrl: string
+  /** Video stopped because the app was hidden mid-recording; Keep says "We saved your movie!". */
+  savedOnLeave?: boolean
 }
 
 /** A saved creation in the gallery (IndexedDB). */
@@ -70,6 +72,8 @@ export interface Creation {
   mime: string
   durationSec?: number
   thumbDataUrl: string
+  /** Set when a grown-up deletes it: it sits in Teacher → "Recently deleted" for 7 days, then is purged. */
+  deletedAt?: number
   /** blob is stored separately under the same id in the 'media' store */
 }
 
@@ -79,7 +83,9 @@ export interface Settings {
   mirror: boolean // mirror front camera preview
   facing: 'user' | 'environment'
   resolution: '540p' | '720p' | '1080p'
-  maxVideoSec: number // default 60
+  maxVideoSec: number // default 15 (kid-friendly); teachers can pick up to 120
+  /** Record the microphone with videos. Off = never ask for the mic. Default on. */
+  recordSound: boolean
   countdownSec: number // default 3
   key: Omit<KeySettings, 'mode'>
   /** auto = use the green screen when one is found, otherwise the AI person cutout */

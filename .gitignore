@@ -21,3 +21,15 @@ web/playwright-report/
 # Keyer harness: generated fixtures + per-run frame dumps (regenerate on demand)
 web/e2e/fixtures/out/
 web/e2e/harness/results/*/
+
+# Keyer harness: keep only milestone results in git; exploratory runs stay local
+web/e2e/harness/results/*
+!web/e2e/harness/results/baseline.*
+!web/e2e/harness/results/nogreen-before.*
+!web/e2e/harness/results/nogreen-after.*
+!web/e2e/harness/results/m1-final*
+!web/e2e/harness/results/m2-final*
+!web/e2e/harness/results/m3-final*
+!web/e2e/harness/results/qa-code*
+!web/e2e/harness/results/fix-batch*
+web/e2e/harness/results/*/

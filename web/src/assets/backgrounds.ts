@@ -13,6 +13,14 @@ export interface BackgroundDef {
   name: string // spoken + aria label
   svg: string // 1920x1080 viewBox, with width/height set so Safari rasterizes crisply
   thumbColor: string // dominant colour, used for tile placeholders
+  /**
+   * Optional "TV front layer" (ease-of-use C5): a 1920x1080 SVG, transparent except for a
+   * desk / fence / bushes that the stage draws OVER the child (under stickers). It hides
+   * the bottom of the cutout, which is where the AI cutout is weakest.
+   */
+  front?: string
+  /** Optional home spot for the child in this world (default: centred, full height). */
+  home?: { x: number; y: number; scale: number }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -452,19 +460,120 @@ const news = scene(
     `<g fill="#fde047" stroke="#ca8a04" stroke-width="5"><polygon points="${starPts(420, 990, 34, 15)}"/><polygon points="${starPts(1500, 990, 34, 15)}"/></g>`,
 )
 
+
+// ---------------------------------------------------------------- front layers (C5)
+// Drawn OVER the child (under stickers), transparent everywhere else. Each one covers the
+// bottom of the stage, where the AI cutout is weakest, and makes the scene look like TV.
+// Same scene() wrapper so they share the style: thick same-hue outlines, round joins.
+
+/** News Desk: the anchor desk (top, mic, mug, front panel) from the scene, now in front. */
+const newsFront = scene(
+  vgrad('nf-d', [0, '#fb923c'], [1, '#ea580c']),
+  `<path d="M200 860H1720L1790 905H130Z" fill="#e2e8f0" stroke="#64748b"/>` +
+    `<g stroke-width="8"><path d="M1560 860V800" stroke="#334155"/><rect x="1536" y="740" width="48" height="74" rx="24" fill="#475569" stroke="#1e293b"/><path d="M1520 862H1600" stroke="#1e293b"/><path d="M340 795H410V862H340Z" fill="#f472b6" stroke="#be185d"/><path d="M410 812Q440 812 440 830Q440 848 410 848" fill="none" stroke="#be185d"/></g>` +
+    `<g ${at(560, 860)}><rect x="-80" y="-22" width="160" height="22" rx="4" fill="#fff" stroke="#94a3b8" stroke-width="6"/><rect x="-70" y="-38" width="150" height="18" rx="4" fill="#fef9c3" stroke="#ca8a04" stroke-width="6" transform="rotate(-4)"/></g>` +
+    `<path d="M150 905H1770L1710 1100H210Z" fill="url(#nf-d)" stroke="#c2410c"/>` +
+    `<path d="M190 935H1730" stroke="#fdba74" stroke-width="10"/>` +
+    `<rect x="700" y="950" width="520" height="104" rx="52" fill="#fff" stroke="#c2410c"/><text x="960" y="1022" text-anchor="middle" ${FONT} font-size="62" textLength="420" lengthAdjust="spacingAndGlyphs" fill="#1d4ed8" stroke="none">KIDS NEWS</text>` +
+    `<g fill="#fde047" stroke="#ca8a04" stroke-width="5"><polygon points="${starPts(420, 1000, 34, 15)}"/><polygon points="${starPts(1500, 1000, 34, 15)}"/></g>`,
+)
+
+/** Weather Map: a small presenter podium in the lower-left sea, under the child's home spot. */
+const weatherFront = scene(
+  '',
+  `<g ${at(614, 1090)}><path d="M-200-200H200L175 0H-175Z" fill="#f97316" stroke="#c2410c"/><path d="M-185-160H185" stroke="#fdba74" stroke-width="10"/><path d="M-235-252H235L215-200H-215Z" fill="#fff" stroke="#1d4ed8"/>` +
+    `${wSun(-132, -100, 0.46)}<text x="52" y="-74" text-anchor="middle" ${FONT} font-size="50" textLength="220" lengthAdjust="spacingAndGlyphs" fill="#fff" stroke="none">WEATHER</text></g>`,
+)
+
+/** Castle: a stone parapet with merlons and a royal shield. */
+const parapetTop = (): string => {
+  let d = 'M-20 1100V880'
+  for (let x = -20; x < 1940; x += 200) d += `H${x + 40}V810H${x + 160}V880`
+  return `${d}H1940V1100Z`
+}
+const castleFront = scene(
+  '',
+  `<path d="${parapetTop()}" fill="#ddd6fe" stroke="#6d28d9" stroke-width="10"/>` +
+    `<g fill="none" stroke="#a78bfa" stroke-width="6">${Array.from({ length: 10 }, (_, i) => `<path d="M${i * 200 + 50} 845H${i * 200 + 130}"/>`).join('')}` +
+    `<path d="M0 960H1920M0 1040H1920"/>${Array.from({ length: 13 }, (_, i) => `<path d="M${i * 160} 880V960M${i * 160 + 80} 960V1040M${i * 160} 1040V1080"/>`).join('')}</g>` +
+    `<g ${at(960, 970)}><path d="M-80-90H80V0Q80 70 0 100Q-80 70-80 0Z" fill="#f472b6" stroke="#be185d"/><path d="M-44-34L-44 10H44V-34L22-10L0-46L-22-10Z" fill="#fde047" stroke="#ca8a04" stroke-width="6"/><circle cy="40" r="12" fill="#fff" stroke="#be185d" stroke-width="6"/></g>` +
+    `<g fill="#4ade80" stroke="#15803d" stroke-width="6">${[[60, 900], [110, 960], [40, 1020], [1860, 910], [1820, 975], [1880, 1035]].map(([x, y]) => `<path d="M${x} ${y}c-30-30 0-60 26-30c26-30 56 0 26 30c-12 14-40 14-52 0z"/>`).join('')}</g>`,
+)
+
+/** Farm: a wooden fence with grass and flowers along the bottom. */
+const post = (x: number): string =>
+  `<path d="M${x - 30} 1100V846L${x} 812L${x + 30} 846V1100Z" fill="#f59e0b" stroke="#92400e"/><path d="M${x - 8} 870V1060" stroke="#d97706" stroke-width="6"/>`
+const farmFront = scene(
+  '',
+  `<rect x="-20" y="880" width="1960" height="46" rx="10" fill="#fbbf24" stroke="#92400e"/><rect x="-20" y="966" width="1960" height="46" rx="10" fill="#fbbf24" stroke="#92400e"/>` +
+    `<path d="M0 903H1920M0 989H1920" stroke="#f59e0b" stroke-width="6" stroke-dasharray="90 60"/>` +
+    Array.from({ length: 11 }, (_, i) => post(60 + i * 180)).join('') +
+    `<path d="M-20 1100V1040${Array.from({ length: 33 }, (_, i) => `Q${i * 60 + 10} ${1000 + (i % 3) * 8} ${i * 60 + 40} 1040`).join('')}V1100Z" fill="#4ade80" stroke="#16a34a"/>` +
+    flower(250, 1048, 0.8) + flower(720, 1056, 0.7) + flower(1270, 1050, 0.8) + flower(1690, 1056, 0.7),
+)
+
+/** Under the Sea: a coral reef along the bottom, tall at the sides. */
+const fan = (x: number, y: number, s: number, f: string, st: string): string =>
+  `<g ${at(x, y, s)}><path d="M-110 0Q-130-150 0-170Q130-150 110 0Z" fill="${f}" stroke="${st}"/><path d="M0 0V-150M0 0L-70-120M0 0L70-120M0 0L-100-50M0 0L100-50" fill="none" stroke="${st}" stroke-width="7"/></g>`
+const brain = (x: number, y: number, rr: number): string =>
+  `<g ${at(x, y)}><path d="M${-rr} 10C${-rr} ${-rr * 1.3} ${rr} ${-rr * 1.3} ${rr} 10Z" fill="#c084fc" stroke="#7e22ce"/><path d="M${r(-rr * 0.7)} -10q${r(rr * 0.23)}-${r(rr * 0.4)} ${r(rr * 0.47)} 0t${r(rr * 0.47)} 0t${r(rr * 0.47)} 0M${r(-rr * 0.45)} ${r(-rr * 0.5)}q${r(rr * 0.22)}-${r(rr * 0.3)} ${r(rr * 0.45)} 0t${r(rr * 0.45)} 0" fill="none" stroke="#7e22ce" stroke-width="7"/></g>`
+const seaFront = scene(
+  '',
+  weed(60, 420, '#15803d', '#4ade80') + weed(1880, 380, '#166534', '#22c55e') + weed(300, 260, '#166534', '#22c55e') + weed(1640, 240, '#15803d', '#4ade80') +
+    line2('M170 1000V820M170 900L110 830V770M170 870L230 800V740M230 800L280 780', '#be185d', '#f472b6', 40) +
+    line2('M1760 1000V840M1760 910L1700 850V790M1760 890L1820 830V770', '#c2410c', '#fb923c', 40) +
+    fan(460, 1000, 0.9, '#fb923c', '#c2410c') + fan(1480, 1000, 1, '#f472b6', '#be185d') + fan(1990, 1000, 1.2, '#facc15', '#ca8a04') +
+    line2('M640 990V900M640 940L600 890M640 925L684 880', '#7e22ce', '#c084fc', 30) + line2('M1290 990V910M1290 950L1250 905M1290 935L1330 895', '#be185d', '#f472b6', 30) +
+    `<path d="M-20 1100V975C300 935 640 995 960 975S1600 935 1940 975V1100Z" fill="#fde68a" stroke="#eab308"/>` +
+    brain(760, 1010, 80) + brain(1180, 1015, 66) +
+    `<polygon points="${starPts(960, 1040, 40, 18)}" fill="#fb923c" stroke="#c2410c"/>` +
+    `<g fill="#e2e8f0" stroke="#64748b">${[[560, 1050, 30], [1360, 1050, 24], [40, 1050, 34]].map(([x, y, rr]) => `<ellipse cx="${x}" cy="${y}" rx="${rr}" ry="${r(rr * 0.7)}"/>`).join('')}</g>`,
+)
+
+/** Jungle: a row of leafy bushes with flowers, taller at the sides. */
+const bush = (x: number, y: number, s: number, c: [string, string]): string =>
+  `<g ${at(x, y, s)} stroke="${c[1]}" stroke-width="${r(10 / s)}"><path d="M-185 260V-30a95 95 0 0 1 85-95a110 110 0 0 1 200 0a95 95 0 0 1 85 95V260Z" fill="${c[0]}"/><path d="M-120-50q20-30 50-34M40-150q30-14 60-4" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="${r(12 / s)}"/></g>`
+const jungleFront = scene(
+  '',
+  leaves([
+    [-40, 760, -40, 1.3, G3],
+    [1960, 780, 220, 1.3, G3],
+    [10, 860, -20, 1.1, G1],
+    [1910, 870, 200, 1.1, G1],
+  ]) +
+    bush(120, 960, 1.15, G3) + bush(1800, 960, 1.15, G3) + bush(480, 1010, 0.95, G1) + bush(1440, 1010, 0.95, G1) + bush(960, 1050, 0.9, G2) + bush(780, 1080, 0.8, G3) + bush(1140, 1080, 0.8, G3) +
+    flower(200, 880, 0.9) + flower(560, 940, 0.8) + flower(960, 975, 0.8) + flower(1360, 945, 0.8) + flower(1730, 880, 0.9) + flower(1040, 1040, 0.6),
+)
+
+/** Outer Space: the rocket's control panel, with buttons, a radar screen and a lever. */
+const spaceFront = scene(
+  vgrad('sf-t', [0, '#cbd5e1'], [1, '#94a3b8']),
+  `<path d="M-20 930L180 860H1740L1940 930Z" fill="url(#sf-t)" stroke="#475569"/>` +
+    `<rect x="-20" y="930" width="1960" height="170" fill="#475569" stroke="#1e293b"/>` +
+    `<g stroke-width="6">${[
+      [330, 896, '#ef4444', '#b91c1c'], [420, 896, '#fde047', '#ca8a04'], [510, 896, '#4ade80', '#15803d'], [600, 896, '#38bdf8', '#0369a1'],
+      [1320, 896, '#f472b6', '#be185d'], [1410, 896, '#fde047', '#ca8a04'], [1500, 896, '#4ade80', '#15803d'], [1590, 896, '#a78bfa', '#6d28d9'],
+    ].map(([x, y, f, st]) => `<ellipse cx="${x}" cy="${y}" rx="30" ry="16" fill="${f}" stroke="${st}"/>`).join('')}</g>` +
+    `<rect x="780" y="955" width="360" height="125" rx="24" fill="#0f172a" stroke="#1e293b"/><g fill="none" stroke="#4ade80" stroke-width="5" opacity=".9"><circle cx="960" cy="1040" r="60"/><circle cx="960" cy="1040" r="30"/><path d="M960 1040L1010 1004"/></g><circle cx="992" cy="1016" r="9" fill="#fde047" stroke="none"/><text x="1090" y="1000" text-anchor="middle" ${FONT} font-size="26" fill="#4ade80" stroke="none">GO</text>` +
+    `<g ${at(300, 1020)}><circle r="64" fill="#fde047" stroke="#ca8a04"/><circle r="44" fill="#ef4444" stroke="#b91c1c"/><path d="M-18-16q14-12 32-6" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="7"/></g>` +
+    `<g ${at(1620, 1040)}><rect x="-90" y="-20" width="180" height="40" rx="20" fill="#1e293b" stroke="#0f172a"/><path d="M30 0L70-90" stroke="#94a3b8" stroke-width="18"/><circle cx="70" cy="-96" r="26" fill="#ef4444" stroke="#b91c1c"/></g>` +
+    `<g stroke="#1e293b" stroke-width="5">${[480, 540, 600, 1320, 1380, 1440].map((x, i) => `<circle cx="${x}" cy="1000" r="14" fill="${['#4ade80', '#fde047', '#ef4444'][i % 3]}"/>`).join('')}</g>` +
+    `<g fill="#334155" stroke="#1e293b" stroke-width="6">${[480, 540, 600, 1320, 1380, 1440].map((x) => `<rect x="${x - 14}" y="1036" width="28" height="44" rx="8"/>`).join('')}</g>`,
+)
+
 export const BUILTIN_BACKGROUNDS: BackgroundDef[] = [
-  { id: 'space', name: 'Outer Space', svg: space, thumbColor: '#3b2a8f' },
-  { id: 'sea', name: 'Under the Sea', svg: sea, thumbColor: '#0ea5e9' },
-  { id: 'jungle', name: 'Jungle', svg: jungle, thumbColor: '#22c55e' },
+  { id: 'space', name: 'Outer Space', svg: space, thumbColor: '#3b2a8f', front: spaceFront },
+  { id: 'sea', name: 'Under the Sea', svg: sea, thumbColor: '#0ea5e9', front: seaFront },
+  { id: 'jungle', name: 'Jungle', svg: jungle, thumbColor: '#22c55e', front: jungleFront },
   { id: 'dino', name: 'Dinosaur Land', svg: dino, thumbColor: '#a3e635' },
   { id: 'city', name: 'Big City', svg: city, thumbColor: '#7dd3fc' },
-  { id: 'weather', name: 'Weather Map', svg: weather, thumbColor: '#2563eb' },
-  { id: 'castle', name: 'Castle', svg: castle, thumbColor: '#e9d5ff' },
-  { id: 'farm', name: 'Farm', svg: farm, thumbColor: '#86efac' },
+  { id: 'weather', name: 'Weather Map', svg: weather, thumbColor: '#2563eb', front: weatherFront, home: { x: 0.32, y: 0.6, scale: 0.64 } },
+  { id: 'castle', name: 'Castle', svg: castle, thumbColor: '#e9d5ff', front: castleFront },
+  { id: 'farm', name: 'Farm', svg: farm, thumbColor: '#86efac', front: farmFront },
   { id: 'moon', name: 'The Moon', svg: moon, thumbColor: '#1e1b4b' },
   { id: 'rainbow', name: 'Rainbow Land', svg: rainbow, thumbColor: '#fbcfe8' },
   { id: 'snow', name: 'Snowy Mountains', svg: snowy, thumbColor: '#bfdbfe' },
-  { id: 'news', name: 'News Desk', svg: news, thumbColor: '#1e40af' },
+  { id: 'news', name: 'News Desk', svg: news, thumbColor: '#1e40af', front: newsFront, home: { x: 0.5, y: 0.56, scale: 0.85 } },
 ]
 
 /** Lookup by id; undefined if unknown. */

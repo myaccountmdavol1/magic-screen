@@ -27,6 +27,8 @@ export interface Scenario {
   awb?: number
   /** fluorescent flicker (rolling bands + global pulse) strength */
   flicker?: number
+  /** global exposure gain in linear light (dim room < 1) */
+  exposure?: number
 }
 
 const PLATE: PlateOpts = { screen: 'green', vignette: 0.12, hotspot: 0, falloff: 0, wrinkles: 0, specks: 0 }
@@ -95,12 +97,64 @@ export const SCENARIOS: Scenario[] = [
   },
   { id: 'specks', title: 'Tape + clips', stresses: 'small specks on the screen (tape strips, clips)', ...BASE, plate: { ...PLATE, specks: 16 } },
   {
+    id: 'specks-edge',
+    title: 'Specks at the frame edge',
+    stresses: 'tape / clips cut by the frame edge (despeckle must not mirror them into big blobs)',
+    ...BASE,
+    plate: { ...PLATE, specks: 6, edgeSpecks: 9 },
+  },
+  {
+    id: 'closeup',
+    title: 'Close-up, teal shirt',
+    stresses: 'kid close to the iPad: shirt (teal, near the screen hue) covers the lower side borders; auto key must not drift onto it',
+    ...BASE,
+    person: {
+      ...KID,
+      shirt: srgb(0.22, 0.6, 0.45),
+      stripe: null,
+      strands: 60,
+      strandLen: 0.05,
+      geom: { headY: 0.45, rx: 0.2, ry: 0.27, hairY: 0.4, hairRx: 0.22, hairRy: 0.24, hairCut: 0.42, neckTop: 0.62, torsoTop: 0.5, torsoHW: 1.0, torsoR: 0.12 },
+    },
+  },
+  {
+    id: 'dim-screen',
+    title: 'Dim screen',
+    stresses: 'unlit screen in a dim room (low exposure + noise): key must hold and ask for more light',
+    ...BASE,
+    noise: { a: 0.0006, b: 0.00001 },
+    exposure: 0.12,
+  },
+  {
+    id: 'harsh-light',
+    title: 'Strong hotspot + falloff',
+    stresses: 'one lamp: bright hotspot, dark colour-shifted far side, heavy vignette (screen flattening, item 7)',
+    ...BASE,
+    plate: { ...PLATE, vignette: 0.35, hotspot: 1.1, falloff: 0.75 },
+  },
+  {
+    id: 'deep-shadow',
+    title: 'Deep cast shadow',
+    stresses: "kid stands close to the sheet: dark cast shadow + folds (screen flattening, item 7)",
+    ...BASE,
+    plate: { ...PLATE, wrinkles: 1.6 },
+    shadow: 0.85,
+  },
+  {
     id: 'classroom',
     title: 'No green screen',
     stresses: 'teacher at a desk in a cluttered classroom: AI cutout (segment) path',
     person: TEACHER,
     plate: { ...PLATE, screen: 'none' },
     noise: MILD_NOISE,
+  },
+  {
+    id: 'webcam-beige',
+    title: 'Laptop webcam, beige wall',
+    stresses: 'no green screen: bald head + beard + glasses against a skin-toned wall, door frame (AI cutout path)',
+    person: { ...TEACHER, kind: 'webcam', strands: 0 },
+    plate: { ...PLATE, screen: 'none', room: 'office' },
+    noise: { a: 0.0006, b: 0.000008 },
   },
 ]
 

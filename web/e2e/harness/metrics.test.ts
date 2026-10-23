@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connError, dilate, edgeBand, frameMetrics, gradError, largestComponent, meanMetrics } from './metrics'
+import { connError, countIslands, dilate, edgeBand, frameMetrics, gradError, largestComponent, meanMetrics } from './metrics'
 
 const W = 40
 const H = 30
@@ -107,5 +107,26 @@ describe('harness metrics', () => {
     const m = meanMetrics([a, b])
     expect(m.sad).toBe(1)
     expect(m.flicker).toBe(4)
+  })
+
+  it('counts detached false-foreground blobs as islands', () => {
+    const g = disc()
+    const a = g.slice()
+    a[0] = 255 // corner speck
+    a[W * H - 1] = 255 // another
+    expect(countIslands(g, g, W, H)).toBe(0)
+    expect(countIslands(a, g, W, H)).toBe(2)
+  })
+
+  it('ghost: alpha left where the GT just moved away; dtSSD: temporal noise', () => {
+    const g0 = disc(16)
+    const g1 = disc(20)
+    const lag = disc(16) // keyer stuck on the previous frame
+    const m = frameMetrics({ W, H, alpha: lag, gt: g1, prevAlpha: lag, prevGt: g0, recentGt: [g0] })
+    expect(m.ghost).toBeGreaterThan(500)
+    const ok = frameMetrics({ W, H, alpha: g1, gt: g1, prevAlpha: g0, prevGt: g0, recentGt: [g0] })
+    expect(ok.ghost).toBe(0)
+    expect(ok.dtSSD).toBeCloseTo(0, 9)
+    expect(m.dtSSD).toBeGreaterThan(0)
   })
 })

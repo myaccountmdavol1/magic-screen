@@ -16,6 +16,16 @@
 //           to the edge (green left on hair/skin after despill)          (x1e3)
 //   UnmixΔE mean CIE76 ΔE between composite and GT composite where 0 < GT < 1
 //           (does the soft edge carry the child's colour, or the screen's?)
+//   ColourΔE  the colour part of UnmixΔE alone: the keyer's edge colour, recovered
+//           from the composite as F = (C - (1 - a)·bg) / a where a >= 0.25, is
+//           re-composited with the GT alpha and compared with the GT composite. Alpha
+//           errors don't count, so it isolates unmixing / despill quality.
+//   Islands mean count of 8-connected alpha >= 0.5 blobs with no GT pixel >= 0.5 in them
+//           (tape / clip specks and other detached false-foreground bits)
+//   Ghost   mean alpha where GT = 0 now but GT >= 0.5 in one of the last 3 frames
+//           (trail left behind a moving arm by temporal smoothing)        (x1e3)
+//   dtSSD   temporal coherence (Erofeev et al. 2015): sqrt(mean(((a_t - a_{t-1}) -
+//           (g_t - g_{t-1}))^2)) over all pixels                        (x1e3)
 // All alpha inputs are bytes (0..255), row-major, top row first.
 
 export interface FrameInput {
@@ -28,6 +38,8 @@ export interface FrameInput {
   /** previous frame's keyer + GT alpha (for flicker), if any */
   prevAlpha?: Uint8Array | null
   prevGt?: Uint8Array | null
+  /** GT alpha of up to the last 3 frames, newest first (for ghost) */
+  recentGt?: Uint8Array[] | null
   /** composite read back from the stage, RGBA bytes, top row first */
   comp?: Uint8Array | null
   /** ground-truth straight foreground colour, RGB bytes */
@@ -49,6 +61,10 @@ export interface FrameMetrics {
   flicker: number | null
   spill: number | null
   unmixDE: number | null
+  colorDE: number | null
+  islands: number
+  ghost: number | null
+  dtSSD: number | null
 }
 
 export const METRIC_KEYS: (keyof FrameMetrics)[] = [
@@ -62,6 +78,10 @@ export const METRIC_KEYS: (keyof FrameMetrics)[] = [
   'flicker',
   'spill',
   'unmixDE',
+  'colorDE',
+  'islands',
+  'ghost',
+  'dtSSD',
 ]
 
 export const METRIC_INFO: Record<keyof FrameMetrics, { label: string; unit: string; digits: number }> = {
@@ -75,6 +95,10 @@ export const METRIC_INFO: Record<keyof FrameMetrics, { label: string; unit: stri
   flicker: { label: 'Flicker', unit: 'x1e3', digits: 2 },
   spill: { label: 'Spill', unit: 'x1e3', digits: 2 },
   unmixDE: { label: 'Unmix ΔE', unit: 'CIE76', digits: 2 },
+  colorDE: { label: 'Colour ΔE', unit: 'CIE76, GT alpha', digits: 2 },
+  islands: { label: 'Islands', unit: 'blobs/frame', digits: 2 },
+  ghost: { label: 'Ghost', unit: 'x1e3', digits: 2 },
+  dtSSD: { label: 'dtSSD', unit: 'x1e3', digits: 2 },
 }
 
 /** Band radius in pixels for a frame of height H (6 px at 360p). */
@@ -274,6 +298,42 @@ export function connError(a: Uint8Array, g: Uint8Array, W: number, H: number, st
   return sum / 1000
 }
 
+/** 8-connected blobs of alpha >= 128 that contain no GT pixel >= 128. */
+export function countIslands(a: Uint8Array, g: Uint8Array, W: number, H: number): number {
+  const n = W * H
+  const seen = new Uint8Array(n)
+  const stack = new Int32Array(n)
+  let count = 0
+  for (let s = 0; s < n; s++) {
+    if (a[s] < 128 || seen[s]) continue
+    let sp = 0
+    let touchesGt = false
+    stack[sp++] = s
+    seen[s] = 1
+    while (sp) {
+      const p = stack[--sp]
+      if (g[p] >= 128) touchesGt = true
+      const x = p % W
+      const y = (p - x) / W
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy
+        if (yy < 0 || yy >= H) continue
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx
+          if (xx < 0 || xx >= W) continue
+          const q = yy * W + xx
+          if (a[q] >= 128 && !seen[q]) {
+            seen[q] = 1
+            stack[sp++] = q
+          }
+        }
+      }
+    }
+    if (!touchesGt) count++
+  }
+  return count
+}
+
 // sRGB byte -> CIELAB (D65)
 const LIN = new Float32Array(256)
 for (let i = 0; i < 256; i++) {
@@ -337,8 +397,33 @@ export function frameMetrics(f: FrameInput): FrameMetrics {
     }
     flicker = c ? (s / c) * 1000 : null
   }
+  let dtSSD: number | null = null
+  if (f.prevAlpha && f.prevGt) {
+    let s = 0
+    for (let i = 0; i < n; i++) {
+      const d = (a[i] - f.prevAlpha[i] - (g[i] - f.prevGt[i])) / 255
+      s += d * d
+    }
+    dtSSD = Math.sqrt(s / n) * 1000
+  }
+  let ghost: number | null = null
+  const recent = f.recentGt?.filter(Boolean) ?? []
+  if (recent.length) {
+    let s = 0
+    let c = 0
+    for (let i = 0; i < n; i++) {
+      if (g[i] !== 0) continue
+      let was = false
+      for (const r0 of recent) if (r0[i] >= 128) was = true
+      if (!was) continue
+      s += a[i] / 255
+      c++
+    }
+    ghost = c ? (s / c) * 1000 : 0
+  }
   let spill: number | null = null
   let unmixDE: number | null = null
+  let colorDE: number | null = null
   if (f.comp && f.gtFg && f.bg) {
     const bg = f.bg
     const L1 = new Float32Array(3)
@@ -351,6 +436,8 @@ export function frameMetrics(f: FrameInput): FrameMetrics {
     let sN = 0
     let eSum = 0
     let eN = 0
+    let cSum = 0
+    let cN = 0
     const k = f.keyCh ?? null
     for (let i = 0; i < n; i++) {
       const gi = g[i]
@@ -375,10 +462,20 @@ export function frameMetrics(f: FrameInput): FrameMetrics {
         lab(Math.round(tr), Math.round(tg), Math.round(tb), L2)
         eSum += Math.hypot(L1[0] - L2[0], L1[1] - L2[1], L1[2] - L2[2])
         eN++
+        const ka = a[i] / 255
+        if (ka >= 0.25) {
+          const fr = Math.min(255, Math.max(0, (cr - (1 - ka) * bg[0]) / ka))
+          const fg = Math.min(255, Math.max(0, (cg - (1 - ka) * bg[1]) / ka))
+          const fb = Math.min(255, Math.max(0, (cb - (1 - ka) * bg[2]) / ka))
+          lab(Math.round(ga * fr + (1 - ga) * bg[0]), Math.round(ga * fg + (1 - ga) * bg[1]), Math.round(ga * fb + (1 - ga) * bg[2]), L1)
+          cSum += Math.hypot(L1[0] - L2[0], L1[1] - L2[1], L1[2] - L2[2])
+          cN++
+        }
       }
     }
     if (k !== null && sN) spill = (sSum / sN) * 1000
     if (eN) unmixDE = eSum / eN
+    if (cN) colorDE = cSum / cN
   }
   return {
     sad: sad / 1000,
@@ -391,6 +488,10 @@ export function frameMetrics(f: FrameInput): FrameMetrics {
     flicker,
     spill,
     unmixDE,
+    colorDE,
+    islands: countIslands(a, g, W, H),
+    ghost,
+    dtSSD,
   }
 }
 
