@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
 }
 
 const SETTINGS_KEY = 'magicscreen.settings'
+const AUDIO_RESET_KEY = 'magicscreen.audioOffReset'
 
 function loadSettings(): Settings {
   try {
@@ -43,7 +44,15 @@ function loadSettings(): Settings {
     for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
       if (k in parsed && parsed[k] !== undefined) (known as Record<string, unknown>)[k] = parsed[k]
     }
-    const merged = { ...DEFAULT_SETTINGS, ...known, key: { ...DEFAULT_SETTINGS.key, ...parsed.key } }
+    let merged = { ...DEFAULT_SETTINGS, ...known, key: { ...DEFAULT_SETTINGS.key, ...parsed.key } }
+    // Older builds saved the whole settings object on any change, so "voice/sounds on"
+    // (their old default) got stored without anyone choosing it. Reset that once; a
+    // teacher's choice after this point is kept.
+    if (localStorage.getItem(AUDIO_RESET_KEY) !== '1') {
+      merged = { ...merged, voice: false, sounds: false }
+      saveSettings(merged)
+      localStorage.setItem(AUDIO_RESET_KEY, '1')
+    }
     return QUIET ? { ...merged, voice: false, sounds: false } : merged
   } catch {
     return DEFAULT_SETTINGS
@@ -53,6 +62,8 @@ function loadSettings(): Settings {
 function saveSettings(s: Settings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+    // Anything saved by this build is a deliberate choice: the one-time audio reset is done.
+    localStorage.setItem(AUDIO_RESET_KEY, '1')
   } catch {
     /* private mode: settings live for this session only */
   }
